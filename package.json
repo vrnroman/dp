@@ -1,0 +1,25 @@
+{
+  "name": "deployment-platform",
+  "private": true,
+  "version": "0.1.0",
+  "description": "A deployment platform for non-engineers. Build with Claude, ship in one command.",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "deployctl": "tsx packages/cli/src/index.ts",
+    "test": "node --import tsx --test packages/**/test/*.test.ts",
+    "check": "tsx packages/cli/src/index.ts check"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.3",
+    "@electric-sql/pglite-socket": "^0.2.6",
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

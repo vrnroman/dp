@@ -1,0 +1,24 @@
+{
+  "name": "@platform/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "deployctl": "src/index.ts"
+  },
+  "main": "src/index.ts",
+  "dependencies": {
+    "@platform/auth": "*",
+    "@platform/conformance": "*",
+    "@platform/manifest": "*",
+    "commander": "^12.1.0",
+    "ora": "^8.1.1",
+    "pg": "^8.13.1",
+    "qrcode": "^1.5.4",
+    "qrcode-terminal": "^0.12.0",
+    "yaml": "^2.6.1"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.11.10",
+    "@types/qrcode": "^1.5.5"
+  }
+}

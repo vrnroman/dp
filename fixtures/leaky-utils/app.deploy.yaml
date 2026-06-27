@@ -1,0 +1,4 @@
+name: leaky-utils
+blueprint: web
+auth:
+  tier: simple

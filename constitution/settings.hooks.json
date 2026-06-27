@@ -1,0 +1,26 @@
+{
+  "//": "Copy these hooks into your app project's .claude/settings.json. They run the platform's conformance check as you build, so problems surface immediately and Claude can fix them. Adjust the path to conformance-hook.mjs for where you keep the platform.",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ~/Documents/deployment-platform/constitution/hooks/conformance-hook.mjs"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ~/Documents/deployment-platform/constitution/hooks/conformance-hook.mjs"
+          }
+        ]
+      }
+    ]
+  }
+}

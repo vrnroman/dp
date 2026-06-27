@@ -1,0 +1,50 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://deployment-platform/app.deploy.yaml",
+  "title": "app.deploy.yaml",
+  "description": "The contract between a Claude-built app and the deployment platform.",
+  "type": "object",
+  "required": ["name", "blueprint"],
+  "additionalProperties": false,
+  "properties": {
+    "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$" },
+    "blueprint": { "enum": ["static", "web", "worker"] },
+    "profile": { "enum": ["personal", "org"] },
+    "runtime": { "type": "string" },
+    "build": { "type": "string" },
+    "output": { "type": "string" },
+    "web": {
+      "type": "object",
+      "required": ["framework"],
+      "properties": { "framework": { "enum": ["nextjs", "vite", "remix", "astro"] } }
+    },
+    "database": {
+      "type": "object",
+      "required": ["engine", "migrations"],
+      "properties": {
+        "engine": { "const": "postgres" },
+        "migrations": { "type": "string" }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "required": ["tier"],
+      "properties": {
+        "tier": { "enum": ["none", "simple", "proper"] },
+        "allowlist": { "type": "array", "items": { "type": "string", "format": "email" } }
+      }
+    },
+    "storage": {
+      "type": "object",
+      "required": ["buckets"],
+      "properties": { "buckets": { "type": "array", "items": { "type": "string" } } }
+    },
+    "env": {
+      "type": "object",
+      "properties": {
+        "required": { "type": "array", "items": { "type": "string" } },
+        "optional": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

@@ -1,0 +1,3 @@
+# Regression fixture: a secret in a .toml config file (a real Supabase file).
+[auth]
+service_role_key = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZV9yb2xlIn0.toml-leaked-sig-7890xyz"

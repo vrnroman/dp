@@ -1,0 +1,7 @@
+name: leaky-sql
+blueprint: web
+database:
+  engine: postgres
+  migrations: ./migrations
+auth:
+  tier: simple

@@ -1,0 +1,19 @@
+{
+  "name": "@platform/auth",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./next": "./src/next.ts",
+    "./pg-store": "./src/pg-store.ts"
+  },
+  "peerDependencies": {
+    "next": ">=14",
+    "pg": ">=8"
+  },
+  "peerDependenciesMeta": {
+    "next": { "optional": true },
+    "pg": { "optional": true }
+  }
+}

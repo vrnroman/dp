@@ -1,0 +1,26 @@
+# This is the contract. The platform reads it and knows exactly how to ship this app.
+# A non-engineer never writes this by hand; Claude writes it, and the platform checks it.
+name: guestbook
+blueprint: web
+profile: personal
+
+web:
+  framework: nextjs
+
+database:
+  engine: postgres
+  migrations: ./migrations
+
+auth:
+  tier: simple
+  # The owner is added automatically on deploy. These people get in too.
+  allowlist:
+    - friend@example.com
+
+storage:
+  buckets:
+    - photos
+
+env:
+  optional:
+    - GUESTBOOK_TITLE
