@@ -5,6 +5,7 @@
  */
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { spawn } from "node:child_process";
 import { exec } from "../util/exec.ts";
 
 const API = "https://api.vercel.com";
@@ -96,25 +97,59 @@ export interface DeployOutcome {
   log: string;
 }
 
-/** Build and ship. Returns the production URL parsed from the CLI output. */
+/**
+ * Build and ship. Returns the production URL parsed from the CLI output.
+ *
+ * The Vercel CLI prints the production URL early (before the build finishes), so we stream
+ * its output and call `onUrl` the first time we see it. That lets the caller show the live
+ * address right away, while the build is still running, instead of only at the very end.
+ */
 export async function deploy(
   token: string,
   repoRoot: string,
+  onUrl?: (url: string) => void,
 ): Promise<DeployOutcome> {
-  const result = await exec(
-    "npx",
-    ["--yes", "vercel@latest", "deploy", "--prod", "--yes", `--token=${token}`, "--cwd", repoRoot],
-    { cwd: repoRoot },
-  );
-  const out = result.stdout + "\n" + result.stderr;
-  const urls = out.match(/https:\/\/[a-z0-9.-]+\.vercel\.app/gi) ?? [];
-  // The production alias is the shortest matching URL (no random deployment hash).
-  const url =
-    urls.sort((a, b) => a.length - b.length)[0] ?? "";
-  if (result.code !== 0 || !url) {
-    throw new Error(`The deploy step failed. Vercel said:\n${tail(out)}`);
-  }
-  return { url, log: out };
+  const URL_RE = /https:\/\/[a-z0-9.-]+\.vercel\.app/i;
+  return new Promise<DeployOutcome>((resolve, reject) => {
+    const child = spawn(
+      "npx",
+      ["--yes", "vercel@latest", "deploy", "--prod", "--yes", `--token=${token}`, "--cwd", repoRoot],
+      { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let out = "";
+    let buf = "";
+    let fired = false;
+    const onData = (d: Buffer) => {
+      const s = d.toString();
+      out += s;
+      buf += s;
+      let nl: number;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        if (!fired && onUrl) {
+          const m = line.match(URL_RE);
+          if (m) {
+            fired = true;
+            onUrl(m[0]);
+          }
+        }
+      }
+    };
+    child.stdout.on("data", onData);
+    child.stderr.on("data", onData);
+    child.on("error", (err) => reject(err));
+    child.on("close", (code) => {
+      const urls = out.match(/https:\/\/[a-z0-9.-]+\.vercel\.app/gi) ?? [];
+      // The production alias is the shortest matching URL (no random deployment hash).
+      const url = urls.sort((a, b) => a.length - b.length)[0] ?? "";
+      if (code !== 0 || !url) {
+        reject(new Error(`The deploy step failed. Vercel said:\n${tail(out)}`));
+        return;
+      }
+      resolve({ url, log: out });
+    });
+  });
 }
 
 export async function deleteProject(token: string, projectId: string): Promise<void> {

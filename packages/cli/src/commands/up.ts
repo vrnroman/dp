@@ -210,7 +210,11 @@ export async function runUp(appDirArg: string, opts: UpOptions): Promise<number>
     n.start("Sending your app live (building and shipping, about a minute)");
     const ctx = prepareDeployContext(appDir);
     vercel.linkProject(ctx.dir, proj.id, acct.id);
-    const outcome = await vercel.deploy(tokens.vercelToken, ctx.dir);
+    // Vercel knows the address before the build finishes, so announce it early. The portal
+    // picks this up and shows the link straight away, marked as going live.
+    const outcome = await vercel.deploy(tokens.vercelToken, ctx.dir, (url) => {
+      n.update(`Your address is ${url} (it goes live the moment the build finishes)`);
+    });
     state.url = outcome.url;
     writeState(appDir, state);
     n.done("Your app is live");

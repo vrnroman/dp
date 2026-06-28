@@ -78,6 +78,7 @@ function shell(body) {
   #log .ok { color:#1f8a4c; } #log .err { color:#c0392b; }
   .deed { display:none; text-align:center; margin-top:20px; }
   .deed .badge { display:inline-block; background:#eafaef; color:#1f8a4c; font-weight:600; font-size:13px; padding:4px 12px; border-radius:999px; }
+  .deed .badge.pending { background:#fcf2dc; color:#9a7b1f; }
   .deed h2 { font-size:24px; margin:12px 0 2px; }
   .deed a.url { display:inline-block; margin:8px 0; color:#e0644b; font-weight:600; word-break:break-all; }
   .deed .where { font-size:13px; color:#8a8178; }
@@ -116,10 +117,10 @@ function homePage() {
       </form>
       <div id="log"></div>
       <div class="deed" id="deed">
-        <span class="badge">Live now</span>
+        <span class="badge" id="deedBadge">Live now</span>
         <h2 id="deedName">It is live</h2>
         <div><a class="url" id="deedUrl" href="#" target="_blank" rel="noopener"></a></div>
-        <p class="where">Lives in your own Vercel account. We have forgotten your keys.</p>
+        <p class="where" id="deedWhere">Lives in your own Vercel account. We have forgotten your keys.</p>
         <a class="open" id="deedOpen" href="#" target="_blank" rel="noopener">Open it</a>
       </div>
     </div>
@@ -153,16 +154,25 @@ function homePage() {
           .then(function (res) {
             if (!res || !res.id) { line((res && res.error) || 'Could not start.', 'err'); reset('Try again'); return; }
             var es = new EventSource('/api/deploy/stream?id=' + encodeURIComponent(res.id) + '&csrf=' + CSRF);
+            function showDeed(url, live) {
+              var a = document.getElementById('deedUrl'); a.href = url; a.textContent = url;
+              document.getElementById('deedOpen').href = url;
+              var badge = document.getElementById('deedBadge');
+              badge.textContent = live ? 'Live now' : 'Going live...';
+              badge.className = 'badge' + (live ? '' : ' pending');
+              document.getElementById('deedName').textContent = (body.name || 'Your app') + (live ? ' is live' : ' is going live');
+              document.getElementById('deedWhere').textContent = live
+                ? 'Lives in your own Vercel account. We have forgotten your keys.'
+                : 'You can keep this link now. It goes live the moment the build finishes (about a minute).';
+              deed.style.display = 'block';
+            }
             es.addEventListener('log', function (ev) { line(ev.data); });
+            es.addEventListener('link', function (ev) { showDeed(ev.data, false); });
             es.addEventListener('done', function (ev) {
               es.close(); reset();
               // Forget the keys in the browser too.
               document.getElementById('vercel').value = ''; document.getElementById('supabase').value = '';
-              var url = ev.data;
-              document.getElementById('deedName').textContent = (body.name || 'Your app') + ' is live';
-              var a = document.getElementById('deedUrl'); a.href = url; a.textContent = url;
-              document.getElementById('deedOpen').href = url;
-              deed.style.display = 'block';
+              showDeed(ev.data, true);
               line('the door answered, it is live', 'ok');
             });
             es.addEventListener('failed', function (ev) { es.close(); reset('Try again'); line(ev.data || 'Something stopped the deploy.', 'err'); });
@@ -241,6 +251,7 @@ function runDeploy(job, creds) {
   const work = mkdtempSync(join(tmpdir(), "portal-"));
   const appDir = join(work, job.slug);
   let urlFound = "";
+  let linkSent = false;
   let child = null;
 
   // Mask the user's tokens out of anything we stream or store, in case a downstream tool
@@ -301,7 +312,11 @@ function runDeploy(job, creds) {
         const raw = buf.slice(0, nl); buf = buf.slice(nl + 1);
         const clean = raw.replace(/^[.…✓✗\s]+/, "").trim();
         const m = raw.match(/https:\/\/[a-z0-9.-]+\.vercel\.app[^\s]*/i);
-        if (m) urlFound = m[0];
+        if (m) {
+          urlFound = m[0];
+          // Show the address as soon as Vercel assigns it, before the build is done.
+          if (!linkSent) { linkSent = true; emit(job, "link", m[0]); }
+        }
         if (clean && !/^[-─]+$/.test(clean) && !clean.includes("Scan to put it")) emit(job, "log", redact(clean));
       }
     };
