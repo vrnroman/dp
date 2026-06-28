@@ -78,11 +78,15 @@ the same apps without code changes.
 
 ## The portal: deploying from a browser
 
-The same `up` is also wrapped in a one-screen browser portal that runs on the VM. You paste a
-GitHub repo, give it a name, and press one button; it clones the repo, runs the same deploy,
-streams the same plain-English narration down the page, and hands back the live link, with a
-grid of everything you have put online. Because it clones and runs code, it sits behind a
-login. It is the "open it in a browser, get a link" experience with no terminal at all.
+`up` is also wrapped in a one-screen browser portal that runs on the owner's VM but deploys
+into each person's **own** Vercel and Supabase. You paste a GitHub repo, give it a name, and
+paste your own two keys (or commit a `.env.deploy` in the repo and skip the form); it clones
+the repo, runs the same deploy with your keys, streams the same plain-English narration down
+the page, and hands back the live link. The app is now on your own accounts, not anyone
+else's. Because it clones and runs code, the portal sits behind a login, and it is fail-closed:
+a deploy with no key is refused, it can never fall back to the owner's accounts, and an
+untrusted repo can never route itself onto the VM. It is the "open it in a browser, get a
+link" experience with no terminal at all.
 
 ## What is real vs. what a hosted product would add
 

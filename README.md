@@ -64,9 +64,11 @@ phone, and a saved `<name>-card.html` you can open or text to a friend.
 - `packages/cli` (`deployctl`) — the one command. On `personal` it provisions Supabase and
   Vercel; on `org` it ships the app onto the owner's own VM as a systemd service behind Caddy
   (`providers/gcp-vm.ts`). Either way it narrates each step in human terms.
-- `apps/portal` — the browser "webapp wrap": paste a GitHub repo, name it, press one button,
-  and watch it go live on your own cloud with the same plain-English narration. Runs on the
-  VM behind a login; shows a grid of your deployed apps.
+- `apps/portal` — the browser "webapp wrap". It runs on the owner's VM, but deploys each
+  person's app into **their own** Vercel + Supabase (their keys, pasted in the form or
+  committed as a `.env.deploy`). Paste a repo, name it, press one button, watch the same
+  plain-English narration, get the live link. It is behind a login and fail-closed: it never
+  uses the owner's accounts and never routes an untrusted repo onto the VM.
 - `apps/reference-web` — the golden example app (a guestbook) that exercises every part:
   saved data, the sign-in gate, an owner-managed allowlist, photo storage, and a secret.
 - `constitution/` — the build rules, plus a Claude Code hook that runs the same
@@ -82,9 +84,10 @@ get deployed, and the person is told exactly why in words they understand.
 
 ## Status
 
-Both the personal and org cells work end to end. The personal data layer is verified against
-a real Postgres, and the reference app has been exercised live (sign-in gate, owner-only
-allowlist, saved data). The org cell deploys DB-less web apps onto the owner's own GCP VM —
-proven live over HTTPS via both the CLI and the browser portal, idempotent and reversible,
-without disturbing the app already running on that machine. Next for the org profile: secrets
-delivery, a database (Cloud SQL), and company sign-in.
+The personal and org cells and the portal all work end to end. The personal data layer is
+verified against a real Postgres, and the reference app has been exercised live (sign-in gate,
+owner-only allowlist, saved data). The org cell deploys DB-less web apps onto the owner's own
+GCP VM via the CLI, idempotent and reversible, without disturbing the app already on the
+machine. The browser portal runs on that VM but deploys each person's app into their own
+Vercel + Supabase, proven live and fail-closed. Next: a real sign-in for the portal, a
+database for the org profile (Cloud SQL), and static-site support.

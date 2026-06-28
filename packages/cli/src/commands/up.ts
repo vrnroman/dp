@@ -51,12 +51,28 @@ export async function runUp(appDirArg: string, opts: UpOptions): Promise<number>
 
   // The org profile deploys onto the owner's own machine (a GCP VM), not Vercel/Supabase.
   // It is its own self-contained path; everything below this point is personal-only.
-  if (manifest.profile === "org") {
+  //
+  // Routing is decided here, and a caller can FORCE it via DP_FORCE_PROFILE regardless of what
+  // the app's manifest says. The portal sets DP_FORCE_PROFILE=personal so an untrusted repo can
+  // never route itself onto the owner's VM by writing `profile: org` (in any YAML spelling).
+  const resolvedProfile = process.env.DP_FORCE_PROFILE ?? manifest.profile ?? "personal";
+  if (resolvedProfile === "org") {
     return await runUpOrg(appDir, manifest, slug, appName, opts);
   }
 
   const tokens = loadTokens();
-  const acct = await vercel.account(tokens.vercelToken);
+  // The Vercel token is the first thing every personal deploy needs. Check it here, gracefully,
+  // so a wrong or expired token (a non-engineer pasting it into the portal) gets a plain message
+  // instead of a stack trace.
+  let acct: Awaited<ReturnType<typeof vercel.account>>;
+  try {
+    acct = await vercel.account(tokens.vercelToken);
+  } catch (err) {
+    process.stdout.write(
+      `That Vercel token did not work, so the app cannot go live on Vercel yet.\n${(err as Error).message}\nDouble-check the token and try again.\n`,
+    );
+    return 1;
+  }
   const ownerEmail = acct.email;
   const members = (manifest.auth?.allowlist ?? []).filter(
     (e) => e.trim().toLowerCase() !== ownerEmail.toLowerCase(),
@@ -76,48 +92,64 @@ export async function runUp(appDirArg: string, opts: UpOptions): Promise<number>
 
   const n = new Narrator();
   try {
-    // 1. Database
-    n.start("Setting up where your data lives");
-    if (!state.supabase) {
-      const orgId = await supabase.firstOrgId(tokens.supabaseAccessToken);
-      const dbPassword = randomBytes(18).toString("base64url");
-      const created = await supabase.createProject(tokens.supabaseAccessToken, {
-        name: slug,
-        orgId,
-        region: tokens.supabaseRegion,
-        dbPass: dbPassword,
-      });
-      state.supabase = { ref: created.ref, region: created.region, dbPassword };
-      writeState(appDir, state);
+    // Supabase is only needed when the app actually uses it: a database, simple sign-in (its
+    // allowlist lives in Postgres), or storage. A plain web app with no sign-in goes straight
+    // to Vercel, so we never provision (or count against the user's quota for) a database it
+    // would never touch.
+    const usesSupabase =
+      !!manifest.database || manifest.auth?.tier === "simple" || !!manifest.storage?.buckets?.length;
+    if (usesSupabase && !tokens.supabaseAccessToken) {
+      throw new Error(
+        "This app needs a database, sign-in, or storage, which run on Supabase, but no Supabase access token was provided.",
+      );
     }
-    n.update("Waiting for your database to come online (this takes a couple of minutes)");
-    await supabase.waitHealthy(tokens.supabaseAccessToken, state.supabase.ref, (status) =>
-      n.update(`Getting your database ready (${humanStatus(status)})`),
-    );
-    const keys = await supabase.getKeys(tokens.supabaseAccessToken, state.supabase.ref);
-    n.done("Your database is ready");
 
-    // The allowlist for simple-auth also lives in Postgres, so we need a working connection
-    // whenever the app has a database OR simple sign-in. Find the right pooler cluster by
-    // actually connecting (DNS cannot tell the clusters apart).
-    const needsDb = !!manifest.database || manifest.auth?.tier === "simple";
+    let keys: { anon: string; serviceRole: string } | null = null;
     let dbUrl: string | null = null;
-    if (needsDb) {
-      n.start("Connecting to your database");
-      for (const candidate of supabase.poolerCandidates(state.supabase.ref, state.supabase.region, state.supabase.dbPassword)) {
-        if (await canConnect(candidate.url)) {
-          dbUrl = candidate.url;
-          state.supabase.poolerHost = candidate.host;
-          writeState(appDir, state);
-          break;
+
+    if (usesSupabase) {
+      // 1. Database
+      n.start("Setting up where your data lives");
+      if (!state.supabase) {
+        const orgId = await supabase.firstOrgId(tokens.supabaseAccessToken);
+        const dbPassword = randomBytes(18).toString("base64url");
+        const created = await supabase.createProject(tokens.supabaseAccessToken, {
+          name: slug,
+          orgId,
+          region: tokens.supabaseRegion,
+          dbPass: dbPassword,
+        });
+        state.supabase = { ref: created.ref, region: created.region, dbPassword };
+        writeState(appDir, state);
+      }
+      n.update("Waiting for your database to come online (this takes a couple of minutes)");
+      await supabase.waitHealthy(tokens.supabaseAccessToken, state.supabase.ref, (status) =>
+        n.update(`Getting your database ready (${humanStatus(status)})`),
+      );
+      keys = await supabase.getKeys(tokens.supabaseAccessToken, state.supabase.ref);
+      n.done("Your database is ready");
+
+      // The allowlist for simple-auth also lives in Postgres, so we need a working connection
+      // whenever the app has a database OR simple sign-in. Find the right pooler cluster by
+      // actually connecting (DNS cannot tell the clusters apart).
+      const needsDb = !!manifest.database || manifest.auth?.tier === "simple";
+      if (needsDb) {
+        n.start("Connecting to your database");
+        for (const candidate of supabase.poolerCandidates(state.supabase.ref, state.supabase.region, state.supabase.dbPassword)) {
+          if (await canConnect(candidate.url)) {
+            dbUrl = candidate.url;
+            state.supabase.poolerHost = candidate.host;
+            writeState(appDir, state);
+            break;
+          }
         }
+        if (!dbUrl) {
+          throw new Error(
+            "The database is up but the platform could not connect to it. This is usually temporary; wait a minute and run this again.",
+          );
+        }
+        n.done("Connected to your database");
       }
-      if (!dbUrl) {
-        throw new Error(
-          "The database is up but the platform could not connect to it. This is usually temporary; wait a minute and run this again.",
-        );
-      }
-      n.done("Connected to your database");
     }
 
     // Always have a stable session secret, whatever the auth tier, so re-runs do not
@@ -149,7 +181,7 @@ export async function runUp(appDirArg: string, opts: UpOptions): Promise<number>
     if (manifest.storage?.buckets?.length) {
       n.start("Setting up photo storage");
       for (const bucket of manifest.storage.buckets) {
-        await supabase.ensurePublicBucket(supabase.projectUrl(state.supabase.ref), keys.serviceRole, bucket);
+        await supabase.ensurePublicBucket(supabase.projectUrl(state.supabase!.ref), keys!.serviceRole, bucket);
       }
       n.done("Storage ready");
     }
@@ -161,11 +193,13 @@ export async function runUp(appDirArg: string, opts: UpOptions): Promise<number>
     writeState(appDir, state);
 
     const envVars: Record<string, string> = {
-      SUPABASE_URL: supabase.projectUrl(state.supabase.ref),
-      SUPABASE_ANON_KEY: keys.anon,
-      SUPABASE_SERVICE_ROLE_KEY: keys.serviceRole,
       PLATFORM_AUTH_SECRET: state.authSecret,
     };
+    if (usesSupabase && keys && state.supabase) {
+      envVars.SUPABASE_URL = supabase.projectUrl(state.supabase.ref);
+      envVars.SUPABASE_ANON_KEY = keys.anon;
+      envVars.SUPABASE_SERVICE_ROLE_KEY = keys.serviceRole;
+    }
     if (dbUrl) envVars.DATABASE_URL = dbUrl;
     for (const k of required) envVars[k] = process.env[k] as string;
     for (const k of manifest.env?.optional ?? []) if (process.env[k]) envVars[k] = process.env[k] as string;
