@@ -62,9 +62,27 @@ providers on deploy, and could wire it to a different stack later without changi
 
 ## The stack it deploys to (chosen for you)
 
-Next.js, Postgres, an email-allowlist sign-in, and file storage, on Vercel + Supabase. You
-never pick these. The plan is a second profile later (a company stack: Cloud Run, Cloud SQL,
-company sign-in) that the same apps deploy to without code changes.
+On the `personal` profile: Next.js, Postgres, an email-allowlist sign-in, and file storage,
+on Vercel + Supabase. You never pick these.
+
+There is now a second profile, `org`, that deploys the same apps onto a machine the owner
+owns instead of Vercel/Supabase. v1 binds to a Google Cloud VM that already runs Caddy
+(automatic HTTPS) in front of per-app systemd services: `deployctl up --profile org` ships
+the app onto the VM, runs it as its own background service on a private port, and gives it an
+address with HTTPS at `<name>.<vm-ip>.sslip.io`. It is idempotent (re-running updates in
+place) and reversible (`down` removes everything it made), and it guards whatever else is on
+the box — it backs up the shared web-server config, validates before reloading, and rolls
+back if the existing site stops answering. v1 deploys apps that need no database or secret
+keys; a richer binding later (Cloud SQL, a managed sign-in, or Cloud Run images) can deploy
+the same apps without code changes.
+
+## The portal: deploying from a browser
+
+The same `up` is also wrapped in a one-screen browser portal that runs on the VM. You paste a
+GitHub repo, give it a name, and press one button; it clones the repo, runs the same deploy,
+streams the same plain-English narration down the page, and hands back the live link, with a
+grid of everything you have put online. Because it clones and runs code, it sits behind a
+login. It is the "open it in a browser, get a link" experience with no terminal at all.
 
 ## What is real vs. what a hosted product would add
 

@@ -17,6 +17,8 @@ export interface ReceiptInfo {
   peopleCount: number;
   hasDatabase: boolean;
   hasStorage: boolean;
+  /** true when there is no sign-in: anyone with the link can open it. */
+  open?: boolean;
 }
 
 export function printReceipt(info: ReceiptInfo): void {
@@ -25,7 +27,11 @@ export function printReceipt(info: ReceiptInfo): void {
   lines.push(`  Your app is live.`);
   lines.push("");
   lines.push(`  What you have    A working "${info.appName}" that anyone with the link can open.`);
-  lines.push(`  Who can get in   ${info.peopleCount} ${info.peopleCount === 1 ? "person" : "people"} you let in. You can add more whenever you like.`);
+  if (info.open) {
+    lines.push(`  Who can get in   Anyone with the link. You can add a sign-in later.`);
+  } else {
+    lines.push(`  Who can get in   ${info.peopleCount} ${info.peopleCount === 1 ? "person" : "people"} you let in. You can add more whenever you like.`);
+  }
   if (info.hasDatabase) {
     lines.push(`  Saved safely     Everything people add is kept in your own database.`);
   }
@@ -102,7 +108,7 @@ function card(info: ReceiptInfo, qrDataUrl: string): string {
     <p class="sub">It is on the internet. Scan to add it to your phone.</p>
     <img class="qr" src="${qrDataUrl}" alt="QR code to open the app" />
     <div><a class="url" href="${escapeAttr(info.url)}">${escapeHtml(info.url)}</a></div>
-    <p class="who">${info.peopleCount} ${info.peopleCount === 1 ? "person can" : "people can"} get in. You decide who.</p>
+    <p class="who">${info.open ? "Anyone with the link can open it." : `${info.peopleCount} ${info.peopleCount === 1 ? "person can" : "people can"} get in. You decide who.`}</p>
     <div class="steps">
       <b>Put it on your home screen</b><br/>
       On iPhone: open the link in Safari, tap Share, then "Add to Home Screen".<br/>

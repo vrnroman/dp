@@ -1,0 +1,10 @@
+{
+  "name": "alive-demo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A tiny self-introducing app that proves it is truly running on your own machine.",
+  "scripts": {
+    "build": "node -e \"console.log('alive-demo: nothing to build')\"",
+    "start": "node server.js"
+  }
+}

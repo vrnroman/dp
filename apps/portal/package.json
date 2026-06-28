@@ -1,0 +1,9 @@
+{
+  "name": "@platform/portal",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The browser portal that wraps deployctl: paste a repo, watch it go live on your own cloud.",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

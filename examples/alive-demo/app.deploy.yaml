@@ -1,0 +1,6 @@
+# This app deploys onto your own Google Cloud (the "org" profile), not Vercel.
+name: alive-demo
+blueprint: web
+profile: org
+auth:
+  tier: none

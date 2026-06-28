@@ -26,8 +26,10 @@ The bridge is `app.deploy.yaml`, a short file Claude writes and the platform rea
 - **Profiles** are where it runs: `personal` (Vercel + Supabase) or `org` (a locked-down
   company stack).
 
-A deploy is one blueprint on one profile. This repository builds the first cell:
-**`web` on the `personal` profile, with simple email-allowlist sign-in.**
+A deploy is one blueprint on one profile. Two cells are built:
+**`web` on `personal`** (Vercel + Supabase, simple email-allowlist sign-in), and
+**`web` on `org`** (the owner's own Google Cloud VM, behind Caddy auto-HTTPS). The same
+app, unchanged, deploys to either.
 
 ## Quick start
 
@@ -59,8 +61,12 @@ phone, and a saved `<name>-card.html` you can open or text to a friend.
 - `packages/auth` (`@platform/auth`) — the identity surface every app codes against. The
   app asks "who is signed in?" and "are they allowed?" and never learns whether the answer
   came from a cookie, Supabase, or, later, a company login.
-- `packages/cli` (`deployctl`) — the one command. Provisions Supabase and Vercel and ships
-  the app, narrating each step in human terms.
+- `packages/cli` (`deployctl`) — the one command. On `personal` it provisions Supabase and
+  Vercel; on `org` it ships the app onto the owner's own VM as a systemd service behind Caddy
+  (`providers/gcp-vm.ts`). Either way it narrates each step in human terms.
+- `apps/portal` — the browser "webapp wrap": paste a GitHub repo, name it, press one button,
+  and watch it go live on your own cloud with the same plain-English narration. Runs on the
+  VM behind a login; shows a grid of your deployed apps.
 - `apps/reference-web` — the golden example app (a guestbook) that exercises every part:
   saved data, the sign-in gate, an owner-managed allowlist, photo storage, and a secret.
 - `constitution/` — the build rules, plus a Claude Code hook that runs the same
@@ -76,7 +82,9 @@ get deployed, and the person is told exactly why in words they understand.
 
 ## Status
 
-The personal cell works end to end. The data layer is verified against a real Postgres, and
-the reference app has been exercised live over HTTP (sign-in gate, owner-only allowlist,
-saved data). The next cell is the `org` profile: the same apps, the same one command, on a
-company stack with company sign-in.
+Both the personal and org cells work end to end. The personal data layer is verified against
+a real Postgres, and the reference app has been exercised live (sign-in gate, owner-only
+allowlist, saved data). The org cell deploys DB-less web apps onto the owner's own GCP VM —
+proven live over HTTPS via both the CLI and the browser portal, idempotent and reversible,
+without disturbing the app already running on that machine. Next for the org profile: secrets
+delivery, a database (Cloud SQL), and company sign-in.

@@ -9,7 +9,10 @@ export class Narrator {
   private spinner: Ora | null = null;
   private quiet: boolean;
 
-  constructor(quiet = false) {
+  // When output is not a terminal (piped, captured by the portal, redirected to a log),
+  // there is no spinner to animate, so we print each step as a plain line instead. That way
+  // the portal can stream real progress to the browser, and logs stay readable.
+  constructor(quiet = !process.stdout.isTTY) {
     this.quiet = quiet;
   }
 

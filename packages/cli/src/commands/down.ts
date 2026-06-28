@@ -4,6 +4,7 @@ import { readState, writeState, clearState } from "../util/state.ts";
 import { Narrator } from "../ui/narrate.ts";
 import * as supabase from "../providers/supabase.ts";
 import * as vercel from "../providers/vercel.ts";
+import { teardownOnVm } from "../providers/gcp-vm.ts";
 
 export interface DownOptions {
   yes?: boolean;
@@ -22,19 +23,34 @@ export async function runDown(appDirArg: string, opts: DownOptions): Promise<num
       `This will permanently remove "${state.appName}" and everything in it:\n` +
         (state.supabase ? `  - the database and all of its data\n` : "") +
         (state.vercel ? `  - the web home at ${state.url ?? "its address"}\n` : "") +
+        (state.gcpVm ? `  - the app and its front-door entry on your VM (${state.url ?? "its address"})\n` : "") +
         `\nThis cannot be undone. Run again with --yes to confirm.\n`,
     );
     return 0;
   }
 
-  const tokens = loadTokens();
+  const tokens = state.vercel || state.supabase ? loadTokens() : null;
   const n = new Narrator();
   let allGone = true;
+
+  if (state.gcpVm) {
+    n.start("Taking the app off your machine");
+    try {
+      await teardownOnVm(state.slug);
+      delete state.gcpVm;
+      delete state.url;
+      writeState(appDir, state);
+      n.done("Removed from your machine");
+    } catch (err) {
+      allGone = false;
+      n.fail(`Could not fully remove it from your machine: ${(err as Error).message}`);
+    }
+  }
 
   if (state.vercel) {
     n.start("Taking down the web home");
     try {
-      await vercel.deleteProject(tokens.vercelToken, state.vercel.projectId);
+      await vercel.deleteProject(tokens!.vercelToken, state.vercel.projectId);
       delete state.vercel;
       writeState(appDir, state);
       n.done("Web home removed");
@@ -47,7 +63,7 @@ export async function runDown(appDirArg: string, opts: DownOptions): Promise<num
   if (state.supabase) {
     n.start("Deleting the database");
     try {
-      await supabase.deleteProject(tokens.supabaseAccessToken, state.supabase.ref);
+      await supabase.deleteProject(tokens!.supabaseAccessToken, state.supabase.ref);
       delete state.supabase;
       writeState(appDir, state);
       n.done("Database deleted");

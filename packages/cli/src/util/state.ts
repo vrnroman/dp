@@ -21,6 +21,19 @@ export interface DeployState {
     projectId: string;
     orgId: string;
   };
+  /** org profile: the app runs as a systemd service behind Caddy on the owner's VM. */
+  gcpVm?: {
+    instance: string;
+    project: string;
+    zone: string;
+    /** the loopback port the service listens on (reused on redeploy). */
+    port: number;
+    /** the service unit name, dp-<slug>. */
+    service: string;
+    /** absolute path to the app directory on the VM. */
+    appDir: string;
+    hostname: string;
+  };
   authSecret?: string;
   url?: string;
 }
