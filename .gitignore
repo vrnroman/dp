@@ -6,5 +6,8 @@ dist/
 build/
 .deploy-state.json
 *-card.html
+*-approval.md
+.env
+.env.local
 *.log
 .DS_Store

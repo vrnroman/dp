@@ -8,6 +8,7 @@
   "main": "src/index.ts",
   "dependencies": {
     "@platform/auth": "*",
+    "@platform/compliance": "*",
     "@platform/conformance": "*",
     "@platform/manifest": "*",
     "commander": "^12.1.0",

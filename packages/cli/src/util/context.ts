@@ -44,6 +44,7 @@ export function prepareDeployContext(appDir: string): DeployContext {
       const base = src.split("/").pop() ?? "";
       if (SKIP.has(base)) return false;
       if (base.endsWith("-card.html")) return false;
+      if (base.endsWith("-approval.md")) return false;
       return true;
     },
   });

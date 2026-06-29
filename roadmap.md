@@ -30,21 +30,30 @@ questions.
   build failure after we have already provisioned (and, on personal, made the user's Supabase
   project). Exposed as `deployctl preflight` / `deployctl check --build`, and run inside
   `deployctl up` before provisioning (skippable with `--skip-build-check`).
+- **Compliance evaluator (`deployctl review`) — POC on the personal stack.** Answers "*may* this
+  ship?" The deterministic half extracts the facts an org approver must trust — technologies and
+  dependencies, the external systems it connects to (real hosts read from the code, never guessed),
+  the data it holds (incl. personal-data detection), the secrets it needs — and an org-policy seed
+  turns those into a verdict (allowed / needs-review / blocked). The AI half writes a short
+  plain-English **approval brief** ("what it does", what to check) for a human to sign off on. The
+  brief runs on Claude via the Claude Code CLI (`claude -p`, on the owner's subscription, NOT an
+  API key) and every call is traced to deployment-platform's own Langfuse project. Built against
+  personal so it can be exercised today; the same shape drops onto the org cell once its stack
+  exists. `packages/compliance`.
 
 ## Next (deferred, rough priority)
 
 1. **Real sign-in for the portal** — today it sits behind one shared password. With users'
    own keys in flight, move to Google sign-in (oauth2-proxy) before opening it beyond the
    owner, and give each person their own space.
-2. **Compliance gate for the org cell (the AI-evaluator half).** The deterministic
-   deployability gate above answers "*can* this ship?" The org cell also needs "*may* this
-   ship?" Org is not only about technical capability, it is about **regulations**: an app
-   deployed into an organization must strictly follow the rules, so this becomes a
-   **compliance gate**, not just a build check, and an app that does not conform does not ship.
-   This is the **AI evaluator** that judges a submission against the template, security
-   expectations, and org policy before it is allowed to deploy — built on top of the
-   deployability gate, which it now has to stand on. Personal is forgiving; org will not be.
-   (A hard requirement for the org cell, not a nice-to-have.)
+2. **Harden the compliance evaluator into the real org gate.** The POC (`deployctl review`, in
+   Done) proves the shape against personal: extract → policy verdict → approval brief. To make
+   it the org cell's actual gate it needs (a) a real, org-authored policy instead of the seed
+   default (stricter outbound allowlist, a banned-dependency list, framework limits, data-handling
+   rules), (b) wiring into `deployctl up --profile org` as a fail-closed gate that refuses a
+   "blocked" verdict and routes "needs-review" to a human approver, and (c) surfacing the approval
+   brief in the browser portal so a non-engineer approver signs off there. Personal is forgiving;
+   org will not be.
 3. **A database for the org/VM profile** — Cloud SQL or Postgres on the VM, then re-run the
    Recipe Box "one app, two homes" test.
 4. **Static-site support** — a Caddy `file_server` path (org) for no-server apps.

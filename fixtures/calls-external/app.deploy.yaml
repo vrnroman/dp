@@ -1,0 +1,12 @@
+name: calls-external
+blueprint: web
+web:
+  framework: nextjs
+database:
+  engine: postgres
+  migrations: ./migrations
+auth:
+  tier: none
+env:
+  required:
+    - STRIPE_SECRET_KEY

@@ -8,6 +8,7 @@ import { Command } from "commander";
 import { runCheck, runCheckHook, runCheckWithBuild } from "./commands/check.ts";
 import { runUp } from "./commands/up.ts";
 import { runDown } from "./commands/down.ts";
+import { runReview } from "./commands/review.ts";
 
 const program = new Command();
 
@@ -44,6 +45,16 @@ program
   .description("Deploy the app. Database, front door, storage, and a live URL, all set up for you.")
   .action(async (app: string, options: { dryRun?: boolean; skipBuildCheck?: boolean }) => {
     process.exitCode = await runUp(app, { dryRun: options.dryRun, skipBuildCheck: options.skipBuildCheck });
+  });
+
+program
+  .command("review")
+  .argument("[app]", "path to the app folder", ".")
+  .option("--no-brief", "skip the AI brief; show the deterministic facts and verdict only")
+  .option("--json", "print the full review as JSON")
+  .description("Write a deployment approval brief: what it does, what it connects to, and a compliance verdict.")
+  .action(async (app: string, options: { brief?: boolean; json?: boolean }) => {
+    process.exitCode = await runReview(app, { brief: options.brief, json: options.json });
   });
 
 program
