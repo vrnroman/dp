@@ -40,20 +40,25 @@ questions.
   API key) and every call is traced to deployment-platform's own Langfuse project. Built against
   personal so it can be exercised today; the same shape drops onto the org cell once its stack
   exists. `packages/compliance`.
+  **⚠️ NOT ACTIVATED.** It exists only as the standalone `deployctl review` command — it is NOT
+  wired into `deployctl up` or the portal, so right now NOTHING is actually gated by it. A deploy
+  proceeds whether or not the evaluator would have blocked it. Activating it (fail-closed in the
+  deploy path + the brief in the portal) is the top of Next — do not ship the org cell without it.
 
 ## Next (deferred, rough priority)
 
 1. **Real sign-in for the portal** — today it sits behind one shared password. With users'
    own keys in flight, move to Google sign-in (oauth2-proxy) before opening it beyond the
    owner, and give each person their own space.
-2. **Harden the compliance evaluator into the real org gate.** The POC (`deployctl review`, in
-   Done) proves the shape against personal: extract → policy verdict → approval brief. To make
-   it the org cell's actual gate it needs (a) a real, org-authored policy instead of the seed
-   default (stricter outbound allowlist, a banned-dependency list, framework limits, data-handling
-   rules), (b) wiring into `deployctl up --profile org` as a fail-closed gate that refuses a
-   "blocked" verdict and routes "needs-review" to a human approver, and (c) surfacing the approval
-   brief in the browser portal so a non-engineer approver signs off there. Personal is forgiving;
-   org will not be.
+2. **ACTIVATE the compliance evaluator, then harden it into the real org gate.** The POC
+   (`deployctl review`, in Done) proves the shape but **gates nothing** — see the ⚠️ note above.
+   First make it actually do something: (a) **wire it into `deployctl up` as a fail-closed gate**
+   that refuses a "blocked" verdict and routes "needs-review" to a human approver (start on
+   personal so it is exercised immediately, not only on the not-yet-built org cell), and (b)
+   **surface the approval brief in the browser portal** so a non-engineer approver signs off there.
+   Then harden for org: (c) a real, org-authored policy instead of the seed default (stricter
+   outbound allowlist, a banned-dependency list, framework limits, data-handling rules). Personal
+   is forgiving; org will not be.
 3. **A database for the org/VM profile** — Cloud SQL or Postgres on the VM, then re-run the
    Recipe Box "one app, two homes" test.
 4. **Static-site support** — a Caddy `file_server` path (org) for no-server apps.
