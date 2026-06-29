@@ -14,7 +14,9 @@ APEX="${IP//./-}.sslip.io"
 HOSTNAME_="portal.$APEX"
 PORT="${PORTAL_PORT:-8090}"
 GATE_USER="${PORTAL_USER:-owner}"
-GATE_PASS="${PORTAL_PASS:-$(openssl rand -base64 12 | tr -d '/+=' | cut -c1-16)}"
+# Empty by default: a redeploy PRESERVES the portal's existing login. Set PORTAL_PASS to rotate
+# it. The VM-side bootstrap mints one only on the very first deploy and prints it then.
+GATE_PASS="${PORTAL_PASS:-}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TGZ="$(mktemp -d)/dp-portal-repo.tgz"
@@ -37,5 +39,10 @@ echo ""
 echo "================ PORTAL READY ================"
 echo "URL:      https://$HOSTNAME_"
 echo "Username: $GATE_USER"
-echo "Password: $GATE_PASS"
+if [ -n "$GATE_PASS" ]; then
+  echo "Password: $GATE_PASS"
+else
+  echo "Password: unchanged (preserved). First deploy mints one — see 'NEW PASSWORD' above."
+  echo "          To rotate it: PORTAL_PASS=your-pass bash scripts/deploy-portal.sh"
+fi
 echo "============================================="

@@ -12,7 +12,9 @@ HOSTNAME_="${2:?hostname}"
 APEX="${3:?apex}"
 APPUSER="${4:?appuser}"
 GATE_USER="${5:?gate user}"
-GATE_PASS="${6:?gate pass}"
+# May be empty. Empty means: preserve the portal's existing login on a redeploy (and only mint
+# a fresh password on the very first deploy). A non-empty value sets/rotates the password.
+GATE_PASS="${6-}"
 
 HOME_DIR="/home/$APPUSER"
 REPO="$HOME_DIR/deployment-platform"
@@ -89,11 +91,33 @@ if ! grep -q 'import /etc/caddy/conf.d/\*\.caddy' "$CADDYFILE"; then
   log "enabled per-app Caddy includes (original backed up)"
 fi
 
-HASH=$(caddy hash-password --plaintext "$GATE_PASS")
+# Decide the basic_auth credentials. A routine redeploy must NOT change how the owner signs in,
+# so when no password is supplied we preserve the existing one verbatim; we only mint a fresh
+# password on the first deploy (no gate file yet) or if the old one cannot be read back.
+PASS_NOTE=""
+NEW_PASS=""
+if [ -n "$GATE_PASS" ]; then
+  AUTHLINE="$GATE_USER $(caddy hash-password --plaintext "$GATE_PASS")"
+  PASS_NOTE="login set from PORTAL_PASS"
+elif [ -f "$APPCADDY" ] && grep -q 'basic_auth' "$APPCADDY"; then
+  AUTHLINE=$(awk '/basic_auth[[:space:]]*\{/{getline; sub(/^[[:space:]]+/,""); sub(/[[:space:]]+$/,""); print; exit}' "$APPCADDY")
+  if [ -n "$AUTHLINE" ]; then
+    PASS_NOTE="login preserved (unchanged)"
+  else
+    NEW_PASS=$(openssl rand -base64 12 | tr -d '/+=' | cut -c1-16)
+    AUTHLINE="$GATE_USER $(caddy hash-password --plaintext "$NEW_PASS")"
+    PASS_NOTE="login reset (previous one could not be read)"
+  fi
+else
+  NEW_PASS=$(openssl rand -base64 12 | tr -d '/+=' | cut -c1-16)
+  AUTHLINE="$GATE_USER $(caddy hash-password --plaintext "$NEW_PASS")"
+  PASS_NOTE="login created (first deploy)"
+fi
+
 cat > "$APPCADDY" <<CADDYEOF
 $HOSTNAME_ {
 	basic_auth {
-		$GATE_USER $HASH
+		$AUTHLINE
 	}
 	encode gzip
 	reverse_proxy 127.0.0.1:$PORT
@@ -118,4 +142,8 @@ if healthy "$BEFORE" && ! healthy "$AFTER"; then
 fi
 
 rm -f "$TGZ"
-log "RESULT url=https://$HOSTNAME_ port=$PORT service=dp-portal"
+log "auth: $PASS_NOTE"
+if [ -n "$NEW_PASS" ]; then
+  log "NEW PASSWORD (save it; it will be preserved on future redeploys): $NEW_PASS"
+fi
+log "RESULT url=https://$HOSTNAME_ port=$PORT service=dp-portal user=$GATE_USER pass=${NEW_PASS:-<unchanged>}"
