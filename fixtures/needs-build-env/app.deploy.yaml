@@ -1,0 +1,5 @@
+name: needs-build-env
+blueprint: worker
+env:
+  required:
+    - NEEDS_THIS

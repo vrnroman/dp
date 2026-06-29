@@ -1,0 +1,8 @@
+{
+  "name": "needs-build-env",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "node -e \"if(!process.env.NEEDS_THIS){console.error('Error: NEEDS_THIS is not defined at build time');process.exit(1)} console.log('built with NEEDS_THIS')\""
+  }
+}

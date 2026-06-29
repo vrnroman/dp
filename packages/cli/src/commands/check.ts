@@ -26,7 +26,7 @@ export async function runCheckWithBuild(appDirArg: string): Promise<number> {
     return 1;
   }
   process.stdout.write("\n");
-  return await runBuildCheck(appDir);
+  return await runBuildCheck(appDir, report.manifest);
 }
 
 /**

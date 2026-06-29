@@ -17,6 +17,7 @@
 import { rmSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
+import type { Manifest } from "@platform/manifest";
 import { prepareDeployContext } from "../util/context.ts";
 import { Narrator } from "../ui/narrate.ts";
 
@@ -34,6 +35,53 @@ export interface BuildPreflightResult {
 export interface BuildPreflightOptions {
   /** Coarse progress callback ("Installing the building blocks", "Building your app"). */
   onStep?: (text: string) => void;
+  /**
+   * Extra environment for the install + build. The build runs before provisioning, so it has
+   * none of the values the platform supplies on deploy. Pass `buildTimeEnv(manifest)` so an
+   * app that reads its declared env (or DATABASE_URL/SUPABASE_*) at build time sees the same
+   * names defined that it would on the host, instead of failing on an undefined variable.
+   */
+  env?: Record<string, string>;
+}
+
+/**
+ * The environment a build should see, reconstructed from the manifest before anything is
+ * provisioned. Two kinds of value, both present on the real host build:
+ *   - the app's own declared secrets (env.required / env.optional) — real values when the
+ *     operator has supplied them, a harmless placeholder for a required one they have not (on
+ *     a real deploy a required secret is always present, so defining it here is faithful);
+ *   - the values the PLATFORM injects on deploy (DATABASE_URL, the SUPABASE_* keys, the auth
+ *     secret) — placeholders, because the real ones do not exist until we provision. A build
+ *     that only needs these defined will pass; a build that actually connects to them at build
+ *     time will still (correctly) fail.
+ * Placeholders are never valid credentials, so this can never make a build falsely "work."
+ */
+export function buildTimeEnv(manifest: Manifest, source: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const env: Record<string, string> = {};
+  const PLACEHOLDER = "deployctl-build-time-placeholder";
+
+  // Values the platform supplies on deploy. Mirror exactly which ones `up` would set.
+  if (manifest.database) {
+    env.DATABASE_URL = `postgresql://placeholder:placeholder@127.0.0.1:5432/${manifest.name}`;
+  }
+  const usesSupabase =
+    !!manifest.database || manifest.auth?.tier === "simple" || !!manifest.storage?.buckets?.length;
+  if (usesSupabase) {
+    env.SUPABASE_URL = "https://placeholder.supabase.co";
+    env.SUPABASE_ANON_KEY = PLACEHOLDER;
+    env.SUPABASE_SERVICE_ROLE_KEY = PLACEHOLDER;
+  }
+  // `up` always sets the auth secret, whatever the tier.
+  env.PLATFORM_AUTH_SECRET = PLACEHOLDER;
+
+  // The app's own declared secrets win over any placeholder.
+  for (const k of manifest.env?.required ?? []) {
+    env[k] = source[k] != null ? (source[k] as string) : `${PLACEHOLDER}-${k}`;
+  }
+  for (const k of manifest.env?.optional ?? []) {
+    if (source[k] != null) env[k] = source[k] as string;
+  }
+  return env;
 }
 
 /**
@@ -70,7 +118,7 @@ export async function buildPreflight(
     //    rewrites @platform/* deps to local file: paths, which any copied lockfile would not
     //    match. Keep it quiet and non-interactive.
     step("Gathering the building blocks your app needs");
-    const install = await run("npm", ["install", "--no-audit", "--no-fund", "--no-progress"], ctxDir);
+    const install = await run("npm", ["install", "--no-audit", "--no-fund", "--no-progress"], ctxDir, opts.env);
     if (install.code !== 0) {
       return {
         ok: false,
@@ -90,7 +138,7 @@ export async function buildPreflight(
 
     // 2. The build itself — the real test of deployability.
     step("Building your app, the same way the internet will");
-    const build = await run("npm", ["run", "build"], ctxDir);
+    const build = await run("npm", ["run", "build"], ctxDir, opts.env);
     if (build.code !== 0) {
       return {
         ok: false,
@@ -120,13 +168,20 @@ export async function buildPreflight(
 }
 
 /** Run a command, capturing combined stdout + stderr. Never rejects; inspect .code. */
-function run(cmd: string, args: string[], cwd: string): Promise<{ code: number; output: string }> {
+function run(
+  cmd: string,
+  args: string[],
+  cwd: string,
+  extraEnv: Record<string, string> = {},
+): Promise<{ code: number; output: string }> {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, {
       cwd,
       // CI=1 and NO_COLOR make tools terse and free of ANSI escapes, so the distilled error
-      // we show a non-engineer is clean text.
-      env: { ...process.env, CI: "1", NO_COLOR: "1", npm_config_audit: "false", npm_config_fund: "false" },
+      // we show a non-engineer is clean text. extraEnv (the reconstructed build-time env) goes
+      // last so it overrides anything ambient — e.g. the owner's real DATABASE_URL is replaced
+      // by a placeholder, so a build check never touches real infrastructure.
+      env: { ...process.env, CI: "1", NO_COLOR: "1", npm_config_audit: "false", npm_config_fund: "false", ...extraEnv },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let output = "";
@@ -152,10 +207,13 @@ function distill(output: string): string {
 }
 
 /** `deployctl preflight [app]` and `deployctl check --build`: static gate + a real build. */
-export async function runBuildCheck(appDir: string): Promise<number> {
+export async function runBuildCheck(appDir: string, manifest: Manifest | null): Promise<number> {
   const n = new Narrator();
   n.start("Checking your app actually builds (this can take a minute)");
-  const result = await buildPreflight(appDir, { onStep: (t) => n.update(t) });
+  const result = await buildPreflight(appDir, {
+    onStep: (t) => n.update(t),
+    env: manifest ? buildTimeEnv(manifest) : undefined,
+  });
   if (result.ok) {
     n.done(result.summary);
     return 0;

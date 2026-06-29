@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { checkApp, renderReport } from "@platform/conformance";
 import type { Manifest } from "@platform/manifest";
-import { buildPreflight } from "./preflight.ts";
+import { buildPreflight, buildTimeEnv } from "./preflight.ts";
 import { loadTokens } from "../util/env.ts";
 import { readState, writeState, type DeployState } from "../util/state.ts";
 import { prepareDeployContext } from "../util/context.ts";
@@ -60,7 +60,10 @@ export async function runUp(appDirArg: string, opts: UpOptions): Promise<number>
   if (!opts.dryRun && !skipBuild) {
     const bn = new Narrator();
     bn.start("Making sure your app builds before anything goes live (this can take a minute)");
-    const build = await buildPreflight(appDir, { onStep: (t) => bn.update(t) });
+    // Build with the same env names the host would have — the app's declared secrets (real if
+    // supplied) plus placeholders for what the platform injects on deploy — so a build that
+    // reads env at build time does not fail here on an undefined variable.
+    const build = await buildPreflight(appDir, { onStep: (t) => bn.update(t), env: buildTimeEnv(manifest) });
     if (!build.ok) {
       bn.fail(build.summary);
       if (build.detail) process.stdout.write("\n" + build.detail + "\n");
