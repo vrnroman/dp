@@ -38,6 +38,17 @@ const SKIP_DIRS = new Set(["node_modules", ".next", ".git", ".vercel", "dist", "
 const NOISE_FILES = new Set(["package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb"]);
 const MAX_SCAN_BYTES = 512 * 1024;
 
+// The frameworks the platform knows how to build, and the npm package that proves the app
+// actually uses each one. A manifest can SAY `framework: nextjs`, but if `next` is not in the
+// dependencies the host build dies with a cryptic "next: command not found" AFTER we have
+// already cloned and pushed. We catch that mismatch here, up front, in plain English.
+const FRAMEWORK_PACKAGE: Record<string, string> = {
+  nextjs: "next",
+  vite: "vite",
+  remix: "@remix-run/dev",
+  astro: "astro",
+};
+
 // High-signal secret patterns. A hit is almost always a real leak, not a false positive.
 const SECRET_PATTERNS: Array<{ re: RegExp; name: string }> = [
   { re: /postgres(?:ql)?:\/\/[^\s'"`]+:[^\s'"`]+@[^\s'"`]+/i, name: "a database connection string with a password in it" },
@@ -171,8 +182,55 @@ export function checkApp(appDir: string): CheckReport {
     }
   }
 
+  // 6. Template shape: a web app must match a framework the platform can build, and that
+  //    framework's package must actually be installed. This is the difference between a clean
+  //    up-front refusal and a cryptic host build failure discovered after the fact.
+  if (manifest.blueprint === "web") {
+    const deps = readDeps(appDir);
+    const declared = manifest.web?.framework;
+    if (declared) {
+      const pkgName = FRAMEWORK_PACKAGE[declared];
+      if (pkgName && deps && !deps.has(pkgName)) {
+        findings.push({
+          level: "error",
+          where: "package.json",
+          problem: `The deploy file says this is a ${declared} app, but "${pkgName}" is not in package.json, so the platform cannot build it.`,
+          fix: `Add ${pkgName} to the app (run \`npm install ${pkgName}\`), or change web.framework in app.deploy.yaml to the framework the app actually uses (${Object.keys(FRAMEWORK_PACKAGE).join(", ")}).`,
+        });
+      } else if (pkgName) {
+        passed.push(`This is a ${declared} app and ${pkgName} is installed.`);
+      }
+    } else {
+      // No framework named: try to detect one so the platform knows how to build it.
+      const detected = deps && Object.entries(FRAMEWORK_PACKAGE).find(([, p]) => deps.has(p))?.[0];
+      if (detected) {
+        passed.push(`Detected a ${detected} app, which the platform knows how to build.`);
+      } else {
+        findings.push({
+          level: "warn",
+          where: "app.deploy.yaml",
+          problem: "This is a web app but it does not name a framework and the platform could not detect one, so it may not know how to build it.",
+          fix: `Add 'web:' then 'framework: nextjs' to app.deploy.yaml (or vite, remix, astro), and make sure that framework is installed.`,
+        });
+      }
+    }
+  }
+
   const ok = findings.every((f) => f.level !== "error");
   return { ok, manifest, passed, findings };
+}
+
+/** Read the union of dependencies + devDependencies from package.json, or null if there is
+ *  no readable package.json. Used to confirm a declared framework is actually present. */
+function readDeps(appDir: string): Set<string> | null {
+  const pkgPath = join(appDir, "package.json");
+  if (!existsSync(pkgPath)) return null;
+  try {
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+    return new Set([...Object.keys(pkg.dependencies ?? {}), ...Object.keys(pkg.devDependencies ?? {})]);
+  } catch {
+    return null;
+  }
 }
 
 function collectSource(appDir: string): string[] {

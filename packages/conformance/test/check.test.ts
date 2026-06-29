@@ -57,6 +57,19 @@ test("secrets in shipped non-code files (.sql migration, .toml config) are caugh
   assert.ok(!report.passed.some((p) => /No secrets/i.test(p)));
 });
 
+test("a web app that claims a framework it has not installed is refused up front", () => {
+  // Regression: the gate must catch "framework: nextjs but next is not in package.json"
+  // here, not let it become a cryptic host build failure after clone + push.
+  const report = checkApp(join(root, "fixtures", "wrong-framework"));
+  assert.equal(report.ok, false);
+  assert.ok(
+    report.findings.some(
+      (f) => f.level === "error" && /nextjs/i.test(f.problem) && /next/.test(f.fix),
+    ),
+    "the missing next dependency must be flagged with a fix",
+  );
+});
+
 test("an app with no manifest is a single clear error", () => {
   const report = checkApp(join(root, "packages")); // no app.deploy.yaml here
   assert.equal(report.ok, false);

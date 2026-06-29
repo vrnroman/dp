@@ -1,0 +1,8 @@
+{
+  "name": "builds-broken",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "node -e \"console.error('TypeError: Cannot read properties of undefined (reading PREFLIGHT_MARKER)'); process.exit(1)\""
+  }
+}

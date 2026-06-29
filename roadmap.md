@@ -20,26 +20,31 @@ questions.
   protects the app already on the box. This is a CLI capability; the portal uses personal.
 - Personal deploys now **skip Supabase** entirely for a no-database, no-sign-in app (Vercel
   only), so they never burn a Supabase project an app would not use.
+- **Deployability gate (the deterministic half).** A real pre-deploy gate, in two layers.
+  Statically (instant, runs in the build-time hook too) it confirms the app matches a shape the
+  platform can ship — e.g. an app that declares `framework: nextjs` but never installed `next`
+  is refused with a plain-English fix instead of dying as a cryptic host build later. Then, on
+  deploy, it **actually builds the app** in a throwaway copy the same way the host would, before
+  a single cloud resource is created: a build break is a plain-English refusal up front, with
+  the failing part of the build output handed back, instead of being discovered as a Vercel
+  build failure after we have already provisioned (and, on personal, made the user's Supabase
+  project). Exposed as `deployctl preflight` / `deployctl check --build`, and run inside
+  `deployctl up` before provisioning (skippable with `--skip-build-check`).
 
 ## Next (deferred, rough priority)
 
 1. **Real sign-in for the portal** — today it sits behind one shared password. With users'
    own keys in flight, move to Google sign-in (oauth2-proxy) before opening it beyond the
    owner, and give each person their own space.
-2. **Deployability & compliance validation (a real pre-deploy gate).** Before it deploys, DP
-   should confirm the repo is genuinely deployable the way our template expects: a valid
-   `app.deploy.yaml` manifest, the template's shape (framework, build, the standard surfaces),
-   and a clean build — refused up front with a plain-English reason, not discovered as a
-   Vercel build failure after the fact. Today the only real "is this deployable?" check is the
-   build failing on Vercel, which is not enough.
-
-   This matters far more for the **org cell** than for personal. Org is not only about
-   technical capability, it is about **regulations**: an app deployed into an organization
-   must strictly follow the rules, so this becomes a **compliance gate**, not just a build
-   check, and an app that does not conform does not ship. We will likely need an **AI
-   evaluator** that judges a submission against the template, security expectations, and org
-   policy before it is allowed to deploy. Personal is forgiving; org will not be. (For another
-   day, but a hard requirement for the org cell, not a nice-to-have.)
+2. **Compliance gate for the org cell (the AI-evaluator half).** The deterministic
+   deployability gate above answers "*can* this ship?" The org cell also needs "*may* this
+   ship?" Org is not only about technical capability, it is about **regulations**: an app
+   deployed into an organization must strictly follow the rules, so this becomes a
+   **compliance gate**, not just a build check, and an app that does not conform does not ship.
+   This is the **AI evaluator** that judges a submission against the template, security
+   expectations, and org policy before it is allowed to deploy — built on top of the
+   deployability gate, which it now has to stand on. Personal is forgiving; org will not be.
+   (A hard requirement for the org cell, not a nice-to-have.)
 3. **A database for the org/VM profile** — Cloud SQL or Postgres on the VM, then re-run the
    Recipe Box "one app, two homes" test.
 4. **Static-site support** — a Caddy `file_server` path (org) for no-server apps.

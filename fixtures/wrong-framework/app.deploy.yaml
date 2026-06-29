@@ -1,0 +1,4 @@
+name: wrong-framework
+blueprint: web
+web:
+  framework: nextjs

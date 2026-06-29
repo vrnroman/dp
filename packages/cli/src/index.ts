@@ -5,7 +5,7 @@
  * question only an engineer could answer.
  */
 import { Command } from "commander";
-import { runCheck, runCheckHook } from "./commands/check.ts";
+import { runCheck, runCheckHook, runCheckWithBuild } from "./commands/check.ts";
 import { runUp } from "./commands/up.ts";
 import { runDown } from "./commands/down.ts";
 
@@ -20,18 +20,30 @@ program
   .command("check")
   .argument("[app]", "path to the app folder", ".")
   .option("--hook", "run as a Claude Code Stop hook (silent on success, exit 2 on problems)")
+  .option("--build", "also build the app to prove it really deploys (slower)")
   .description("Tell me if this app is ready to deploy, in plain English.")
-  .action((app: string, options: { hook?: boolean }) => {
-    process.exitCode = options.hook ? runCheckHook(app) : runCheck(app);
+  .action(async (app: string, options: { hook?: boolean; build?: boolean }) => {
+    if (options.hook) process.exitCode = runCheckHook(app);
+    else if (options.build) process.exitCode = await runCheckWithBuild(app);
+    else process.exitCode = runCheck(app);
+  });
+
+program
+  .command("preflight")
+  .argument("[app]", "path to the app folder", ".")
+  .description("The full pre-deploy gate: the shape check, plus a real build, before anything goes live.")
+  .action(async (app: string) => {
+    process.exitCode = await runCheckWithBuild(app);
   });
 
 program
   .command("up")
   .argument("[app]", "path to the app folder", ".")
   .option("--dry-run", "show what would happen without doing it")
+  .option("--skip-build-check", "skip the pre-deploy build (the host will still build it)")
   .description("Deploy the app. Database, front door, storage, and a live URL, all set up for you.")
-  .action(async (app: string, options: { dryRun?: boolean }) => {
-    process.exitCode = await runUp(app, { dryRun: options.dryRun });
+  .action(async (app: string, options: { dryRun?: boolean; skipBuildCheck?: boolean }) => {
+    process.exitCode = await runUp(app, { dryRun: options.dryRun, skipBuildCheck: options.skipBuildCheck });
   });
 
 program

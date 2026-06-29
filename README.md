@@ -34,8 +34,11 @@ app, unchanged, deploys to either.
 ## Quick start
 
 ```bash
-# Is this app ready to deploy? Plain-English answer.
+# Is this app ready to deploy? Plain-English answer (instant, no build).
 deployctl check ./my-app
+
+# Prove it really deploys: the shape check, plus a real build, before anything goes live.
+deployctl preflight ./my-app
 
 # See what a deploy would do, without doing it.
 deployctl up ./my-app --dry-run
@@ -57,7 +60,11 @@ phone, and a saved `<name>-card.html` you can open or text to a friend.
 - `packages/manifest` — the `app.deploy.yaml` contract and its validator.
 - `packages/conformance` — the gate that decides if an app is shippable. It checks the
   manifest, refuses to deploy if a secret is hardcoded, makes sure database migrations
-  exist, and more. Every problem comes with a plain-English fix. It never edits your code.
+  exist, confirms the app matches a shape the platform can build (e.g. an app that claims
+  `framework: nextjs` but never installed `next` is refused up front, not at host-build time),
+  and more. Every problem comes with a plain-English fix. It never edits your code. This is the
+  instant, static half of the deployability gate; the deep half — an actual build in a
+  throwaway copy before anything goes live — runs inside the CLI (`deployctl preflight`).
 - `packages/auth` (`@platform/auth`) — the identity surface every app codes against. The
   app asks "who is signed in?" and "are they allowed?" and never learns whether the answer
   came from a cookie, Supabase, or, later, a company login.
@@ -89,5 +96,7 @@ verified against a real Postgres, and the reference app has been exercised live 
 owner-only allowlist, saved data). The org cell deploys DB-less web apps onto the owner's own
 GCP VM via the CLI, idempotent and reversible, without disturbing the app already on the
 machine. The browser portal runs on that VM but deploys each person's app into their own
-Vercel + Supabase, proven live and fail-closed. Next: a real sign-in for the portal, a
-database for the org profile (Cloud SQL), and static-site support.
+Vercel + Supabase, proven live and fail-closed. A real pre-deploy gate now builds each app in
+a throwaway copy before any cloud resource is created, so a build break is a plain-English
+refusal up front instead of a cryptic host failure after the fact. Next: an AI compliance
+evaluator for the org cell, a real sign-in for the portal, and a database for the org profile.

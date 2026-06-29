@@ -36,10 +36,15 @@ providers on deploy, and could wire it to a different stack later without changi
    `recipes` table, a family allowlist, and a dish photo per recipe.
 
 3. **Check it.** `deployctl check .` says, in plain English, whether it is ready and how to fix
-   anything. (It is the same check the engine runs again before deploying, so it cannot be
-   skipped.)
+   anything: a valid deploy file, no leaked secrets, the migrations it claims, and a shape the
+   platform can actually build (an app that says it is Next.js but never installed `next` is
+   caught here, not at host-build time). It is the same static check the engine runs again
+   before deploying, so it cannot be skipped. `deployctl preflight .` goes one step further and
+   actually **builds** the app in a throwaway copy, so you know it deploys before you try.
 
-4. **Ship it.** `deployctl up .` makes every technology decision for you and:
+4. **Ship it.** `deployctl up .` makes every technology decision for you. First it builds the
+   app in a throwaway copy to be sure it deploys — if the build breaks, it stops here with a
+   plain-English reason and nothing is created. Then it:
    - creates a Postgres database and runs your migrations,
    - puts up the sign-in front door and adds you as the owner,
    - creates the photo storage,

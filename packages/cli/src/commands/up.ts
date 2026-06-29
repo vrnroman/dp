@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { checkApp, renderReport } from "@platform/conformance";
 import type { Manifest } from "@platform/manifest";
+import { buildPreflight } from "./preflight.ts";
 import { loadTokens } from "../util/env.ts";
 import { readState, writeState, type DeployState } from "../util/state.ts";
 import { prepareDeployContext } from "../util/context.ts";
@@ -15,6 +16,8 @@ import { vmConfig, pickPort, deployToVm, waitForPublic } from "../providers/gcp-
 
 export interface UpOptions {
   dryRun?: boolean;
+  /** Skip the real build that runs before provisioning. The host will still build it. */
+  skipBuildCheck?: boolean;
 }
 
 export async function runUp(appDirArg: string, opts: UpOptions): Promise<number> {
@@ -47,6 +50,25 @@ export async function runUp(appDirArg: string, opts: UpOptions): Promise<number>
         `Set ${missing.length === 1 ? "it" : "them"} in your environment and run this again. For example: export ${missing[0]}=...\n`,
     );
     return 1;
+  }
+
+  // The deployability gate's deep half: actually build the app in a throwaway copy BEFORE a
+  // single cloud resource is created. A build break becomes a plain-English refusal here,
+  // instead of a cryptic host build failure discovered after we have provisioned (and, on
+  // personal, created the user's Supabase project). Skipped on a dry run or when opted out.
+  const skipBuild = opts.skipBuildCheck || process.env.DP_SKIP_BUILD_CHECK === "1";
+  if (!opts.dryRun && !skipBuild) {
+    const bn = new Narrator();
+    bn.start("Making sure your app builds before anything goes live (this can take a minute)");
+    const build = await buildPreflight(appDir, { onStep: (t) => bn.update(t) });
+    if (!build.ok) {
+      bn.fail(build.summary);
+      if (build.detail) process.stdout.write("\n" + build.detail + "\n");
+      process.stdout.write("\nNothing was put online. Fix the problem above and run this again.\n");
+      return 1;
+    }
+    if (build.ran) bn.done(build.summary);
+    else bn.done();
   }
 
   // The org profile deploys onto the owner's own machine (a GCP VM), not Vercel/Supabase.
