@@ -16,6 +16,41 @@ export interface Dependency {
   dev: boolean;
 }
 
+/** A coarse bucket an approver understands at a glance. */
+export type ServiceCategory =
+  | "payments"
+  | "ai"
+  | "object-storage"
+  | "queue"
+  | "email"
+  | "sms"
+  | "database"
+  | "analytics"
+  | "search"
+  | "monitoring"
+  | "auth"
+  | "other";
+
+/**
+ * A named external system the app talks to, fused from up to three deterministic signals: an npm
+ * dependency, an env-var (secret) name, and an outbound host. The point is to catch the systems a
+ * bare URL scan misses — an S3 bucket, a work queue, a SaaS SDK whose URL lives inside the package,
+ * not the app's own source. Everything here is read from the code; nothing is guessed.
+ */
+export interface ExternalService {
+  /** Stable key so the three channels collapse to ONE service (e.g. "stripe", "aws-s3"). */
+  key: string;
+  /** Outcome-first, plain-English label a non-engineer can approve: "Takes card payments through Stripe". */
+  label: string;
+  category: ServiceCategory;
+  /** The concrete signals that fired, so the fact stays auditable ("uses the \"stripe\" package"). */
+  evidence: string[];
+  /** Outbound hosts this service explains, so the host list does not double-count them. */
+  hosts: string[];
+  /** The secret this service appears to ride on, if one is declared (e.g. "STRIPE_SECRET_KEY"). */
+  secret?: string;
+}
+
 export interface AppFacts {
   name: string;
   blueprint: string;
@@ -24,6 +59,8 @@ export interface AppFacts {
   dependencies: Dependency[];
   /** Distinct external hosts the code references (real third-party/own-infra connections). */
   outboundHosts: string[];
+  /** Named external systems the app talks to (fused from dependency, secret, and host signals). */
+  externalServices: ExternalService[];
   /** True if the app makes outbound network calls at all (even to non-literal hosts). */
   makesNetworkCalls: boolean;
   data: {
@@ -90,6 +127,123 @@ const CAPABILITIES: Array<{ re: RegExp; label: string }> = [
 
 const URL_RE = /\bhttps?:\/\/([a-z0-9.-]+\.[a-z]{2,})(?::\d+)?/gi;
 
+/**
+ * The external-service fingerprint table — the curated, conservative core of "what does this app
+ * connect to?" Each entry maps three deterministic signals to one plain-English service:
+ *   - `deps`    : exact npm package names (direct dependencies only — no lockfile walking)
+ *   - `secrets` : an env-var-name pattern (catches a SaaS used via a secret even with no SDK or URL)
+ *   - `hosts`   : an outbound-host pattern (names a raw host, so api.stripe.com reads as "Stripe")
+ * A service surfaces if ANY channel fires; the channels fuse into one line. Deliberately excluded:
+ * the platform's own stack (Supabase, Vercel) and generic SQL drivers (pg, mysql) that just reach
+ * the database the platform itself provisions — those are not third-party systems to approve.
+ */
+interface Fingerprint {
+  key: string;
+  label: string;
+  category: ServiceCategory;
+  deps?: string[];
+  secrets?: RegExp;
+  hosts?: RegExp;
+}
+
+const FINGERPRINTS: Fingerprint[] = [
+  // Payments
+  { key: "stripe", label: "Takes card payments through Stripe", category: "payments", deps: ["stripe", "@stripe/stripe-js"], secrets: /^STRIPE_/i, hosts: /(^|\.)stripe\.com$/ },
+  { key: "braintree", label: "Takes payments through Braintree", category: "payments", deps: ["braintree"] },
+  { key: "paypal", label: "Takes payments through PayPal", category: "payments", deps: ["@paypal/checkout-server-sdk", "paypal-rest-sdk"] },
+  { key: "razorpay", label: "Takes payments through Razorpay", category: "payments", deps: ["razorpay"], secrets: /^RAZORPAY_/i },
+  // AI / LLM
+  { key: "openai", label: "Sends text to OpenAI", category: "ai", deps: ["openai"], secrets: /^OPENAI_/i, hosts: /(^|\.)openai\.com$/ },
+  { key: "anthropic", label: "Sends text to Anthropic (Claude)", category: "ai", deps: ["@anthropic-ai/sdk"], secrets: /^ANTHROPIC_/i, hosts: /(^|\.)anthropic\.com$/ },
+  { key: "gemini", label: "Sends text to Google Gemini", category: "ai", deps: ["@google/generative-ai"], hosts: /generativelanguage\.googleapis\.com$/ },
+  { key: "cohere", label: "Sends text to Cohere", category: "ai", deps: ["cohere-ai"], secrets: /^COHERE_/i },
+  { key: "replicate", label: "Runs AI models on Replicate", category: "ai", deps: ["replicate"], secrets: /^REPLICATE_/i, hosts: /(^|\.)replicate\.com$/ },
+  // Object storage
+  { key: "aws-s3", label: "Keeps files on Amazon S3", category: "object-storage", deps: ["@aws-sdk/client-s3"], secrets: /^(AWS_S3|S3_BUCKET|S3_ACCESS)/i, hosts: /(^s3[.-]|\.s3[.-]|\.s3\.).*amazonaws\.com$/ },
+  { key: "gcs", label: "Keeps files on Google Cloud Storage", category: "object-storage", deps: ["@google-cloud/storage"], hosts: /storage\.googleapis\.com$/ },
+  { key: "azure-blob", label: "Keeps files on Azure Blob Storage", category: "object-storage", deps: ["@azure/storage-blob"], hosts: /\.blob\.core\.windows\.net$/ },
+  { key: "minio", label: "Keeps files on S3-compatible storage (MinIO)", category: "object-storage", deps: ["minio"] },
+  { key: "cloudinary", label: "Stores and serves images on Cloudinary", category: "object-storage", deps: ["cloudinary"], secrets: /^CLOUDINARY_/i, hosts: /(^|\.)cloudinary\.com$/ },
+  // Queues / messaging
+  { key: "aws-sqs", label: "Uses an Amazon SQS work queue", category: "queue", deps: ["@aws-sdk/client-sqs"], hosts: /sqs\..*amazonaws\.com$/ },
+  { key: "bullmq", label: "Runs a background work queue (BullMQ on Redis)", category: "queue", deps: ["bullmq", "bull"] },
+  { key: "rabbitmq", label: "Uses a RabbitMQ message queue", category: "queue", deps: ["amqplib", "amqp-connection-manager"], secrets: /^(RABBITMQ|AMQP)_/i },
+  { key: "kafka", label: "Streams messages through Apache Kafka", category: "queue", deps: ["kafkajs"] },
+  { key: "pubsub", label: "Uses Google Pub/Sub messaging", category: "queue", deps: ["@google-cloud/pubsub"] },
+  // Email
+  { key: "sendgrid", label: "Sends email through SendGrid", category: "email", deps: ["@sendgrid/mail", "@sendgrid/client"], secrets: /^SENDGRID_/i, hosts: /(^|\.)sendgrid\.com$/ },
+  { key: "resend", label: "Sends email through Resend", category: "email", deps: ["resend"], secrets: /^RESEND_/i, hosts: /(^|\.)resend\.com$/ },
+  { key: "postmark", label: "Sends email through Postmark", category: "email", deps: ["postmark"], hosts: /(^|\.)postmarkapp\.com$/ },
+  { key: "mailgun", label: "Sends email through Mailgun", category: "email", deps: ["mailgun.js", "mailgun-js"], secrets: /^MAILGUN_/i },
+  { key: "smtp", label: "Sends email over SMTP", category: "email", deps: ["nodemailer"] },
+  // SMS / voice
+  { key: "twilio", label: "Sends texts or calls through Twilio", category: "sms", deps: ["twilio"], secrets: /^TWILIO_/i, hosts: /(^|\.)twilio\.com$/ },
+  { key: "vonage", label: "Sends texts through Vonage", category: "sms", deps: ["@vonage/server-sdk"] },
+  // External databases (not the platform's own Postgres)
+  { key: "mongodb", label: "Stores data in MongoDB", category: "database", deps: ["mongodb", "mongoose"], secrets: /^(MONGO|MONGODB)_/i },
+  { key: "dynamodb", label: "Stores data in Amazon DynamoDB", category: "database", deps: ["@aws-sdk/client-dynamodb"] },
+  { key: "planetscale", label: "Stores data in PlanetScale", category: "database", deps: ["@planetscale/database"], hosts: /(^|\.)psdb\.cloud$/ },
+  { key: "firebase", label: "Stores data in Firebase", category: "database", deps: ["firebase", "firebase-admin"], hosts: /firebaseio\.com$|firestore\.googleapis\.com$/ },
+  { key: "upstash", label: "Uses an Upstash Redis database", category: "database", deps: ["@upstash/redis"], secrets: /^UPSTASH_/i, hosts: /(^|\.)upstash\.io$/ },
+  { key: "redis", label: "Connects to a Redis server", category: "database", deps: ["ioredis", "redis"] },
+  // Search
+  { key: "algolia", label: "Searches through Algolia", category: "search", deps: ["algoliasearch"], secrets: /^ALGOLIA_/i },
+  { key: "elasticsearch", label: "Searches through Elasticsearch", category: "search", deps: ["@elastic/elasticsearch"] },
+  // Analytics / monitoring
+  { key: "sentry", label: "Reports errors to Sentry", category: "monitoring", deps: ["@sentry/node", "@sentry/nextjs", "@sentry/react"], secrets: /^SENTRY_/i, hosts: /(^|\.)sentry\.io$/ },
+  { key: "posthog", label: "Sends product analytics to PostHog", category: "analytics", deps: ["posthog-node", "posthog-js"], secrets: /^POSTHOG_/i, hosts: /(^|\.)posthog\.com$/ },
+  { key: "mixpanel", label: "Sends product analytics to Mixpanel", category: "analytics", deps: ["mixpanel"] },
+  { key: "segment", label: "Sends product analytics to Segment", category: "analytics", deps: ["analytics-node", "@segment/analytics-node"] },
+  // Third-party sign-in
+  { key: "clerk", label: "Signs users in through Clerk", category: "auth", deps: ["@clerk/nextjs", "@clerk/clerk-sdk-node", "@clerk/backend"], secrets: /^CLERK_/i },
+  { key: "auth0", label: "Signs users in through Auth0", category: "auth", deps: ["auth0", "@auth0/nextjs-auth0"], secrets: /^AUTH0_/i },
+];
+
+/**
+ * Fuse the fingerprint channels into a deduped list of external services. Each service carries the
+ * hosts it explains (`hosts`), so callers dedup against the raw host list without re-parsing text.
+ */
+function detectExternalServices(deps: Dependency[], secretNames: string[], hosts: string[]): ExternalService[] {
+  const depSet = new Set(deps.map((d) => d.name));
+  const services: ExternalService[] = [];
+
+  for (const fp of FINGERPRINTS) {
+    const evidence: string[] = [];
+    const svcHosts: string[] = [];
+
+    const hitDep = fp.deps?.find((d) => depSet.has(d));
+    if (hitDep) evidence.push(`uses the "${hitDep}" package`);
+
+    let secret: string | undefined;
+    if (fp.secrets) {
+      secret = secretNames.find((s) => fp.secrets!.test(s));
+      if (secret) evidence.push(`needs the ${secret} secret`);
+    }
+
+    if (fp.hosts) {
+      for (const h of hosts) {
+        if (fp.hosts.test(h)) {
+          evidence.push(`connects to ${h}`);
+          svcHosts.push(h);
+        }
+      }
+    }
+
+    if (evidence.length) {
+      services.push({ key: fp.key, label: fp.label, category: fp.category, evidence, hosts: svcHosts, secret });
+    }
+  }
+
+  return services;
+}
+
+/** The set of outbound hosts already explained by a named service, so hosts are never double-counted. */
+export function hostsClaimedByServices(services: ExternalService[]): Set<string> {
+  const claimed = new Set<string>();
+  for (const s of services) for (const h of s.hosts) claimed.add(h);
+  return claimed;
+}
+
 export function extractFacts(appDir: string, manifest: Manifest): AppFacts {
   const files = collectSource(appDir);
   const texts = new Map<string, string>();
@@ -137,6 +291,20 @@ export function extractFacts(appDir: string, manifest: Manifest): AppFacts {
     if (re.test(schemaText) && !personalData.includes(label)) personalData.push(label);
   }
 
+  // Named external systems, fused from the dependency, secret-name, and host signals. The secret
+  // names come from BOTH the manifest AND `process.env.X` references in the source, so a SaaS wired
+  // up through an env var the app reads directly (but never declared in app.deploy.yaml, e.g. set
+  // in the Vercel dashboard) still surfaces for review instead of slipping through.
+  const codeEnvNames = new Set<string>();
+  for (const m of allText.matchAll(/process\.env\.([A-Z0-9_]+)|process\.env\[\s*['"]([A-Z0-9_]+)['"]\s*\]/g)) {
+    const name = m[1] ?? m[2];
+    if (name) codeEnvNames.add(name);
+  }
+  const secretNames = [
+    ...new Set([...(manifest.env?.required ?? []), ...(manifest.env?.optional ?? []), ...codeEnvNames]),
+  ];
+  const externalServices = detectExternalServices(dependencies, secretNames, [...hosts]);
+
   return {
     name: manifest.name,
     blueprint: manifest.blueprint,
@@ -144,6 +312,7 @@ export function extractFacts(appDir: string, manifest: Manifest): AppFacts {
     runtime,
     dependencies,
     outboundHosts: [...hosts].sort(),
+    externalServices: externalServices.sort((a, b) => a.label.localeCompare(b.label)),
     makesNetworkCalls,
     data: {
       hasDatabase: !!manifest.database,

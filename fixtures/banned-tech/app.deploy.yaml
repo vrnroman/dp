@@ -1,0 +1,4 @@
+name: banned-tech
+blueprint: web
+web:
+  framework: nextjs

@@ -13,11 +13,11 @@
 import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { Manifest } from "@platform/manifest";
-import { extractFacts, type AppFacts } from "./extract.ts";
+import { extractFacts, hostsClaimedByServices, type AppFacts } from "./extract.ts";
 import { evaluatePolicy, DEFAULT_POLICY, type OrgPolicy, type Verdict } from "./policy.ts";
 import { writeBrief, type Brief } from "./brief.ts";
 
-export type { AppFacts } from "./extract.ts";
+export type { AppFacts, ExternalService } from "./extract.ts";
 export type { OrgPolicy, Verdict, PolicyFinding, Decision } from "./policy.ts";
 export type { Brief } from "./brief.ts";
 export { DEFAULT_POLICY, evaluatePolicy } from "./policy.ts";
@@ -132,11 +132,20 @@ export function renderApprovalCard(r: Review): string {
   const pd = f.data.personalData.length ? ` Personal data: ${f.data.personalData.join(", ")}.` : "";
   L.push(`Data:           ${dataLine}${pd}`);
 
+  // Named services (Stripe, S3, a queue) claim the hosts they explain, so a host is not shown twice.
+  const claimedHosts = hostsClaimedByServices(f.externalServices);
+  const looseHosts = f.outboundHosts.filter((h) => !claimedHosts.has(h));
+
   L.push(`Connects out to:`);
-  if (f.outboundHosts.length === 0) {
+  if (f.externalServices.length === 0 && looseHosts.length === 0) {
     L.push(`                - nothing outside its own platform`);
   } else {
-    for (const h of f.outboundHosts) {
+    for (const svc of f.externalServices) {
+      const flagged = r.verdict.flaggedServices.includes(svc.key);
+      const sec = svc.secret ? ` [${svc.secret}]` : "";
+      L.push(`                - ${svc.label}${sec}${flagged ? "   <-- NEEDS REVIEW" : "   (approved)"}`);
+    }
+    for (const h of looseHosts) {
       const flagged = r.verdict.unapprovedHosts.includes(h);
       L.push(`                - ${h}${flagged ? "   <-- NEEDS REVIEW (not on approved list)" : "   (approved)"}`);
     }
@@ -180,9 +189,15 @@ export function renderApprovalMarkdown(r: Review): string {
   L.push(`**Built with:** ${[f.framework, ...f.dependencies.filter((d) => !d.dev).map((d) => d.name)].filter(Boolean).join(", ")}`);
   L.push(`**Sign-in:** ${describeAuth(f.data.authTier)}`);
   L.push("");
+  const claimed = hostsClaimedByServices(f.externalServices);
+  const loose = f.outboundHosts.filter((h) => !claimed.has(h));
   L.push(`**Connects out to:**`);
-  if (f.outboundHosts.length === 0) L.push(`- nothing outside its own platform`);
-  for (const h of f.outboundHosts) {
+  if (f.externalServices.length === 0 && loose.length === 0) L.push(`- nothing outside its own platform`);
+  for (const svc of f.externalServices) {
+    const flagged = r.verdict.flaggedServices.includes(svc.key);
+    L.push(`- ${svc.label}${svc.secret ? ` (uses ${svc.secret})` : ""}${flagged ? " — **needs review**" : " — approved"}`);
+  }
+  for (const h of loose) {
     L.push(`- ${h}${r.verdict.unapprovedHosts.includes(h) ? " — **needs review** (not on approved list)" : " — approved"}`);
   }
   if (f.secrets.required.length || f.secrets.optional.length) {

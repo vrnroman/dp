@@ -1,0 +1,4 @@
+name: clean-static
+blueprint: web
+web:
+  framework: nextjs

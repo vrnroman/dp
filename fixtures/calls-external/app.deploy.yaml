@@ -10,3 +10,5 @@ auth:
 env:
   required:
     - STRIPE_SECRET_KEY
+  optional:
+    - AWS_S3_BUCKET

@@ -30,35 +30,44 @@ questions.
   build failure after we have already provisioned (and, on personal, made the user's Supabase
   project). Exposed as `deployctl preflight` / `deployctl check --build`, and run inside
   `deployctl up` before provisioning (skippable with `--skip-build-check`).
-- **Compliance evaluator (`deployctl review`) — POC on the personal stack.** Answers "*may* this
-  ship?" The deterministic half extracts the facts an org approver must trust — technologies and
-  dependencies, the external systems it connects to (real hosts read from the code, never guessed),
-  the data it holds (incl. personal-data detection), the secrets it needs — and an org-policy seed
-  turns those into a verdict (allowed / needs-review / blocked). The AI half writes a short
-  plain-English **approval brief** ("what it does", what to check) for a human to sign off on. The
-  brief runs on Claude via the Claude Code CLI (`claude -p`, on the owner's subscription, NOT an
-  API key) and every call is traced to deployment-platform's own Langfuse project. Built against
-  personal so it can be exercised today; the same shape drops onto the org cell once its stack
-  exists. `packages/compliance`.
-  **⚠️ NOT ACTIVATED.** It exists only as the standalone `deployctl review` command — it is NOT
-  wired into `deployctl up` or the portal, so right now NOTHING is actually gated by it. A deploy
-  proceeds whether or not the evaluator would have blocked it. Activating it (fail-closed in the
-  deploy path + the brief in the portal) is the top of Next — do not ship the org cell without it.
+- **Compliance evaluator — ACTIVATED as a real fail-closed gate.** Answers "*may* this ship?" The
+  deterministic half extracts the facts an org approver must trust — technologies and dependencies,
+  the external systems it connects to, the data it holds (incl. personal-data detection), the
+  secrets it needs — and an org-policy seed turns those into a verdict (allowed / needs-review /
+  blocked). The AI half writes a short plain-English **approval brief** for a human to sign off on,
+  on Claude via `claude -p` (subscription, NOT an API key), traced to deployment-platform's own
+  Langfuse project. `packages/compliance`, `deployctl review`.
+  **External-dependency detection (the owner's ask).** "What does this app connect to?" is now more
+  than a URL scan: a curated fingerprint table fuses THREE deterministic signals — an npm dependency
+  name, an env-var/secret name, and an outbound host — into named services, so an S3 bucket, a work
+  queue, or a SaaS SDK whose URL lives inside the package (not the app's source) still surfaces. The
+  platform's own stack (Supabase/Vercel) and generic Postgres drivers are excluded, so the list stays
+  honest. Each detected service flips the verdict to needs-review with the secret it rides on named.
+  **Now it actually gates.** (a) Wired into `deployctl up` as a fail-closed gate that runs before the
+  build: a `blocked` verdict never deploys; a `needs-review` verdict needs a human OK (an interactive
+  y/N on the CLI, or `DP_COMPLIANCE_APPROVED=1` from the portal); anything non-interactive and
+  unapproved is refused, never hung; a review that cannot run fails closed. (b) The **browser portal**
+  now runs the review after cloning and, when something needs review, PAUSES and shows the concrete
+  dependencies (Stripe, S3, a queue, ...) so a non-engineer can **approve or decline** on the spot;
+  only on approve does it resume into the deploy. A blocked repo is refused with a plain reason; a
+  clean repo flows straight through. Proven end to end: `banned-tech` (puppeteer → blocked),
+  `clean-static` (no deps → straight deploy), `calls-external` (Stripe/S3/queue/OpenAI → informed,
+  approve-or-decline), driven live over HTTP.
+  **Still a seed policy.** The banned list (heavyweight headless browsers) and outbound allowlist are
+  example rules; a real org tightens them (see Next).
 
 ## Next (deferred, rough priority)
 
 1. **Real sign-in for the portal** — today it sits behind one shared password. With users'
    own keys in flight, move to Google sign-in (oauth2-proxy) before opening it beyond the
    owner, and give each person their own space.
-2. **ACTIVATE the compliance evaluator, then harden it into the real org gate.** The POC
-   (`deployctl review`, in Done) proves the shape but **gates nothing** — see the ⚠️ note above.
-   First make it actually do something: (a) **wire it into `deployctl up` as a fail-closed gate**
-   that refuses a "blocked" verdict and routes "needs-review" to a human approver (start on
-   personal so it is exercised immediately, not only on the not-yet-built org cell), and (b)
-   **surface the approval brief in the browser portal** so a non-engineer approver signs off there.
-   Then harden for org: (c) a real, org-authored policy instead of the seed default (stricter
-   outbound allowlist, a banned-dependency list, framework limits, data-handling rules). Personal
-   is forgiving; org will not be.
+2. **Harden the compliance gate into the real org policy.** Activation is done (see Done): the gate
+   is fail-closed in `deployctl up` and the portal shows concrete dependencies for approve/decline.
+   What remains is org-strength policy: (c) a real, org-authored policy instead of the seed default
+   (stricter outbound allowlist, a fuller banned-dependency list, framework limits, data-handling
+   rules), and per-org **approved-services** allowlists (the `approvedServices` hook exists but is
+   empty today). (d) A persistent **approve-once** memory so a re-deploy of an already-approved app
+   does not re-prompt. Personal is forgiving; org will not be.
 3. **A database for the org/VM profile** — Cloud SQL or Postgres on the VM, then re-run the
    Recipe Box "one app, two homes" test.
 4. **Static-site support** — a Caddy `file_server` path (org) for no-server apps.

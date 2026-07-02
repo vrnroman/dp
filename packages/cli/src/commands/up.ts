@@ -1,7 +1,9 @@
 import { resolve, join } from "node:path";
 import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
+import { createInterface } from "node:readline";
 import { checkApp, renderReport } from "@platform/conformance";
+import { review, type Review } from "@platform/compliance";
 import type { Manifest } from "@platform/manifest";
 import { buildPreflight, buildTimeEnv } from "./preflight.ts";
 import { loadTokens } from "../util/env.ts";
@@ -52,6 +54,19 @@ export async function runUp(appDirArg: string, opts: UpOptions): Promise<number>
     return 1;
   }
 
+  // The compliance gate: "*may* this ship?", on top of the deployability gate's "*can* it?".
+  // It runs EARLY (before we spend a minute building, let alone provision) because refusing on
+  // policy should be the first thing that happens, not the last. It is fail-closed: a "blocked"
+  // verdict never deploys; a "needs-review" verdict (an unapproved external service, personal
+  // data with no sign-in, a powerful capability) needs a person's OK first, which arrives either
+  // as DP_COMPLIANCE_APPROVED=1 (the portal, after the user approved the list in the browser) or
+  // an interactive y/N here; anything non-interactive and unapproved is refused, never hung on.
+  // DP_SKIP_REVIEW=1 is the owner's own escape hatch (the portal must never set it).
+  if (!opts.dryRun && process.env.DP_SKIP_REVIEW !== "1") {
+    const gate = await complianceGate(appDir, manifest);
+    if (gate !== null) return gate;
+  }
+
   // The deployability gate's deep half: actually build the app in a throwaway copy BEFORE a
   // single cloud resource is created. A build break becomes a plain-English refusal here,
   // instead of a cryptic host build failure discovered after we have provisioned (and, on
@@ -85,7 +100,15 @@ export async function runUp(appDirArg: string, opts: UpOptions): Promise<number>
     return await runUpOrg(appDir, manifest, slug, appName, opts);
   }
 
-  const tokens = loadTokens();
+  // Loading tokens can refuse (no Vercel token supplied). Catch it so the user gets a plain
+  // message instead of an uncaught stack trace, the same way the account check below does.
+  let tokens: ReturnType<typeof loadTokens>;
+  try {
+    tokens = loadTokens();
+  } catch (err) {
+    process.stdout.write(`${(err as Error).message}\nNothing was put online.\n`);
+    return 1;
+  }
   // The Vercel token is the first thing every personal deploy needs. Check it here, gracefully,
   // so a wrong or expired token (a non-engineer pasting it into the portal) gets a plain message
   // instead of a stack trace.
@@ -458,4 +481,85 @@ function titleCase(slug: string): string {
     .filter(Boolean)
     .map((w) => w[0].toUpperCase() + w.slice(1))
     .join(" ");
+}
+
+/**
+ * The compliance gate. Returns null to let the deploy proceed, or an exit code to stop it.
+ * Deterministic facts + verdict only (no AI brief) — the gate must be fast and never depend on a
+ * model being reachable. Fail-closed on every uncertain path.
+ */
+export async function complianceGate(appDir: string, manifest: Manifest): Promise<number | null> {
+  let result: Review;
+  try {
+    result = await review(appDir, manifest, { skipBrief: true });
+  } catch (err) {
+    // If the review itself cannot run, we do not know whether the app is allowed — so we refuse.
+    process.stdout.write(
+      `The safety review could not run, so nothing was deployed.\n${(err as Error).message}\n` +
+        `This is unusual. Try again; if it keeps failing, something is wrong with the app files.\n`,
+    );
+    return 1;
+  }
+  const { verdict } = result;
+
+  if (verdict.decision === "blocked") {
+    process.stdout.write("This app can't be put online as-is. The platform's rules do not allow:\n\n");
+    for (const f of verdict.findings.filter((x) => x.level === "deny")) {
+      process.stdout.write(`  - ${f.detail}\n`);
+    }
+    process.stdout.write(
+      `\nNothing was put online. Remove the item${
+        verdict.findings.filter((x) => x.level === "deny").length === 1 ? "" : "s"
+      } above and run this again.\n`,
+    );
+    return 1;
+  }
+
+  if (verdict.decision === "allowed") {
+    process.stdout.write("Safety review: this app keeps to its own platform, nothing to approve. Proceeding.\n");
+    return null;
+  }
+
+  // needs-review — a person must confirm the list below.
+  const flags = verdict.findings.filter((x) => x.level === "flag");
+  const reviewList = [
+    "Before this goes live, please confirm what it connects to and uses:",
+    "",
+    ...flags.map((f) => `  - ${f.detail}`),
+    "",
+  ].join("\n");
+
+  if (process.env.DP_COMPLIANCE_APPROVED === "1") {
+    process.stdout.write(reviewList);
+    process.stdout.write("You approved these, so the deploy is going ahead.\n");
+    return null;
+  }
+
+  process.stdout.write(reviewList);
+
+  // Interactive terminal: ask the person directly. Non-interactive and unapproved: refuse (never
+  // block on stdin that will not come).
+  if (process.stdin.isTTY && process.stdout.isTTY) {
+    const yes = await askYesNo("Approve these and put it online? [y/N] ");
+    if (yes) return null;
+    process.stdout.write("\nOkay, nothing was put online.\n");
+    return 1;
+  }
+
+  process.stdout.write(
+    "\nThis app connects to outside systems that need a person's okay before it goes live. Nothing was put online.\n" +
+      "Approve it in the portal, or once you have confirmed the list above, run it again with your approval.\n",
+  );
+  return 1;
+}
+
+/** Ask a yes/no question on the terminal. Defaults to no on empty input or EOF. */
+function askYesNo(question: string): Promise<boolean> {
+  return new Promise((resolvePrompt) => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(question, (answer) => {
+      rl.close();
+      resolvePrompt(/^y(es)?$/i.test(answer.trim()));
+    });
+  });
 }

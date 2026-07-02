@@ -35,6 +35,10 @@ let busy = false;
 // decoupled (no secrets in the streaming URL). id -> job.
 const jobs = new Map();
 
+// How long an awaiting-approval job survives after its last watcher disconnects, before the slot
+// is freed (a transient reconnect cancels it). Tunable for tests; production default is 45s.
+const GRACE_MS = Number(process.env.DP_PORTAL_GRACE_MS) || 45000;
+
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$/;
 const REPO_RE = /^https:\/\/(github\.com|gitlab\.com|bitbucket\.org)\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?(\.git)?$/;
 
@@ -76,6 +80,22 @@ function shell(body) {
   #log { margin-top:18px; font:14px/1.7 ui-monospace,Menlo,monospace; color:#5b5346;
     background:#f6efe2; border-radius:12px; padding:16px; max-height:320px; overflow:auto; display:none; white-space:pre-wrap; }
   #log .ok { color:#1f8a4c; } #log .err { color:#c0392b; }
+  .review { display:none; margin-top:18px; background:#fffdf8; border:1px solid #ece3d2; border-radius:16px; padding:20px; }
+  .review h3 { margin:0 0 4px; font-size:18px; }
+  .review .sub { margin:0 0 14px; color:#8a8178; font-size:14px; }
+  .review ul { list-style:none; margin:0; padding:0; }
+  .review li { display:flex; gap:10px; align-items:flex-start; padding:10px 12px; border:1px solid #efe7d6; border-radius:12px; margin-bottom:8px; background:#faf6ef; }
+  .review li .ic { font-size:16px; line-height:1.5; }
+  .review li .txt { flex:1; }
+  .review li .txt b { display:block; font-size:15px; }
+  .review li .txt small { color:#8a8178; }
+  .review .row { display:flex; gap:10px; margin-top:14px; }
+  .review .row button { margin-top:0; }
+  .review .decline { background:#f0e8d8; color:#5b5346; }
+  .review .decline:hover { background:#e7ddc9; }
+  .reject { display:none; margin-top:18px; background:#fdecec; border:1px solid #f2c9c9; border-radius:16px; padding:20px; color:#8a2b25; }
+  .reject h3 { margin:0 0 8px; font-size:18px; }
+  .reject pre { white-space:pre-wrap; font:14px/1.6 inherit; margin:0; }
   .deed { display:none; text-align:center; margin-top:20px; }
   .deed .badge { display:inline-block; background:#eafaef; color:#1f8a4c; font-weight:600; font-size:13px; padding:4px 12px; border-radius:999px; }
   .deed .badge.pending { background:#fcf2dc; color:#9a7b1f; }
@@ -116,6 +136,19 @@ function homePage() {
         <button id="go" type="submit">Put it online</button>
       </form>
       <div id="log"></div>
+      <div class="review" id="review">
+        <h3>Before it goes live, please confirm what it uses</h3>
+        <p class="sub" id="reviewSub">This app connects to outside systems. Approve them if they are expected.</p>
+        <ul id="reviewList"></ul>
+        <div class="row">
+          <button id="approve" type="button">Yes, this is expected. Put it online</button>
+          <button id="decline" class="decline" type="button">No, stop</button>
+        </div>
+      </div>
+      <div class="reject" id="reject">
+        <h3>This can't go online</h3>
+        <pre id="rejectWhy"></pre>
+      </div>
       <div class="deed" id="deed">
         <span class="badge" id="deedBadge">Live now</span>
         <h2 id="deedName">It is live</h2>
@@ -130,14 +163,55 @@ function homePage() {
       var form = document.getElementById('drop');
       var log = document.getElementById('log');
       var deed = document.getElementById('deed');
+      var reviewBox = document.getElementById('review');
+      var rejectBox = document.getElementById('reject');
       var go = document.getElementById('go');
+      var approvedNote = '';
+      var ICON = { payments:'💳', ai:'🤖', 'object-storage':'🗄️', queue:'📨', email:'✉️', sms:'💬', database:'🗃️', analytics:'📊', search:'🔎', monitoring:'🚨', auth:'🔑' };
       function line(text, cls) {
         var div = document.createElement('div');
         if (cls) div.className = cls;
         div.textContent = text;
         log.appendChild(div); log.scrollTop = log.scrollHeight;
       }
-      function reset(label) { go.disabled = false; go.textContent = label || 'Put it online'; }
+      function reset(label) {
+        go.disabled = false; go.textContent = label || 'Put it online';
+        reviewBox.style.display = 'none';
+      }
+      function decide(id, decision) {
+        var approve = document.getElementById('approve'), declineBtn = document.getElementById('decline');
+        approve.disabled = true; declineBtn.disabled = true;
+        reviewBox.style.display = 'none';
+        fetch('/api/deploy/decide', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: id, decision: decision, csrf: CSRF }) })
+          .then(function (r) { return r.json(); })
+          .then(function (res) { if (res && res.error) throw new Error(res.error); })
+          .catch(function () {
+            // The job is still waiting on the server, so let the person choose again rather than
+            // leaving the deploy stuck. (If the server did receive it, its SSE event cleans up.)
+            line('Could not send your decision. Please choose again.', 'err');
+            approve.disabled = false; declineBtn.disabled = false;
+            reviewBox.style.display = 'block';
+          });
+      }
+      function renderReview(data, id) {
+        var list = document.getElementById('reviewList'); list.innerHTML = '';
+        function item(icon, title, note) {
+          var li = document.createElement('li');
+          var ic = document.createElement('span'); ic.className = 'ic'; ic.textContent = icon;
+          var tx = document.createElement('div'); tx.className = 'txt';
+          var b = document.createElement('b'); b.textContent = title; tx.appendChild(b);
+          if (note) { var sm = document.createElement('small'); sm.textContent = note; tx.appendChild(sm); }
+          li.appendChild(ic); li.appendChild(tx); list.appendChild(li);
+        }
+        (data.services || []).forEach(function (s) { item(ICON[s.category] || '🔌', s.label, s.secret ? 'Uses your ' + s.secret + ' key' : ''); });
+        (data.otherItems || []).forEach(function (t) { item('⚠️', t, ''); });
+        approvedNote = (data.services || []).map(function (s) { return s.label; }).join('; ');
+        var approve = document.getElementById('approve'), declineBtn = document.getElementById('decline');
+        approve.disabled = false; declineBtn.disabled = false;
+        approve.onclick = function () { go.textContent = 'Putting it online...'; decide(id, 'approve'); };
+        declineBtn.onclick = function () { approvedNote = ''; decide(id, 'decline'); reset(); };
+        reviewBox.style.display = 'block';
+      }
       form.addEventListener('submit', function (e) {
         e.preventDefault();
         var body = {
@@ -148,6 +222,7 @@ function homePage() {
           csrf: CSRF
         };
         log.style.display = 'block'; log.innerHTML = ''; deed.style.display = 'none';
+        reviewBox.style.display = 'none'; rejectBox.style.display = 'none'; approvedNote = '';
         go.disabled = true; go.textContent = 'Working...';
         fetch('/api/deploy', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
           .then(function (r) { return r.json(); })
@@ -161,13 +236,28 @@ function homePage() {
               badge.textContent = live ? 'Live now' : 'Going live...';
               badge.className = 'badge' + (live ? '' : ' pending');
               document.getElementById('deedName').textContent = (body.name || 'Your app') + (live ? ' is live' : ' is going live');
-              document.getElementById('deedWhere').textContent = live
+              var whereText = live
                 ? 'Lives in your own Vercel account. We have forgotten your keys.'
                 : 'You can keep this link now. It goes live the moment the build finishes (about a minute).';
+              if (approvedNote) whereText += ' You approved: ' + approvedNote + '.';
+              document.getElementById('deedWhere').textContent = whereText;
               deed.style.display = 'block';
             }
             es.addEventListener('log', function (ev) { line(ev.data); });
             es.addEventListener('link', function (ev) { showDeed(ev.data, false); });
+            es.addEventListener('approval', function (ev) {
+              var data; try { data = JSON.parse(ev.data); } catch (e) { data = { services: [], otherItems: [] }; }
+              renderReview(data, res.id);
+            });
+            es.addEventListener('rejected', function (ev) {
+              es.close(); reset('Try a different app');
+              document.getElementById('rejectWhy').textContent = ev.data || 'The platform rules do not allow it.';
+              rejectBox.style.display = 'block';
+            });
+            es.addEventListener('declined', function (ev) {
+              es.close(); reset();
+              line(ev.data || 'Okay, nothing was put online.');
+            });
             es.addEventListener('done', function (ev) {
               es.close(); reset();
               // Forget the keys in the browser too.
@@ -188,8 +278,15 @@ function homePage() {
 function sse(res) {
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
   let closed = false;
-  res.on("close", () => (closed = true));
-  res.on("error", () => (closed = true));
+  // A comment heartbeat keeps proxies and idle timeouts from dropping the connection during the
+  // (possibly minutes-long) human approval hold, when no real events are flowing.
+  const hb = setInterval(() => {
+    if (closed) return;
+    try { res.write(": keep-alive\n\n"); } catch { closed = true; }
+  }, 25000);
+  const shut = () => { closed = true; clearInterval(hb); };
+  res.on("close", shut);
+  res.on("error", shut);
   return {
     get closed() { return closed; },
     send(event, data) {
@@ -200,15 +297,16 @@ function sse(res) {
         res.write("\n");
       } catch { closed = true; }
     },
-    end() { if (!closed) try { res.end(); } catch {} },
+    end() { clearInterval(hb); if (!closed) try { res.end(); } catch {} },
   };
 }
 
 // ---------- deploy ----------
+const TERMINAL = new Set(["done", "failed", "rejected", "declined"]);
 function emit(job, event, data) {
   job.events.push({ event, data });
   for (const ch of job.subs) ch.send(event, data);
-  if (event === "done" || event === "failed") {
+  if (TERMINAL.has(event)) {
     job.done = true;
     for (const ch of job.subs) ch.end();
     setTimeout(() => jobs.delete(job.id), 60000);
@@ -247,12 +345,41 @@ function tokensFromRepoFile(appDir, creds) {
   }
 }
 
+// Build the compact approval summary the browser renders: the plain-English things a person must
+// confirm before this app goes live. Deterministic facts only (no AI); every line comes straight
+// from the code the evaluator read.
+function approvalSummary(review) {
+  const f = review.facts || {};
+  const v = review.verdict || {};
+  const services = (f.externalServices || []).map((s) => ({
+    label: s.label,
+    secret: s.secret || "",
+    category: s.category || "other",
+  }));
+  // The remaining flags that are not a named service (personal-data-without-sign-in, an unknown
+  // host, a powerful capability) still need a person's okay, so include them as plain lines.
+  const otherItems = (v.findings || [])
+    .filter((x) => x.level === "flag" && x.topic !== "service")
+    .map((x) => x.detail);
+  return { name: f.name || "", services, otherItems };
+}
+
+// The plain no: why a blocked app cannot ship, in the house voice.
+function rejectionText(review) {
+  const denies = ((review.verdict && review.verdict.findings) || []).filter((x) => x.level === "deny");
+  const why = denies.map((x) => "- " + x.detail).join("\n") || "- It uses something the platform's rules do not allow.";
+  return "This app can't be put online as it is. The rules do not allow:\n" + why;
+}
+
+// The whole deploy is one orchestration: fetch -> review -> (approve) -> put online. The review
+// step is the gate. A "blocked" app is refused; a "needs-review" app HOLDS here until the person
+// approves in the browser (POST /api/deploy/decide resumes it); an "allowed" app flows straight on.
 function runDeploy(job, creds) {
   const work = mkdtempSync(join(tmpdir(), "portal-"));
   const appDir = join(work, job.slug);
-  let urlFound = "";
-  let linkSent = false;
   let child = null;
+  let watchdog = null;
+  let approvalTimer = null;
 
   // Mask the user's tokens out of anything we stream or store, in case a downstream tool
   // ever echoes them in an error.
@@ -263,17 +390,22 @@ function runDeploy(job, creds) {
     return out;
   };
 
-  let watchdog = null;
   const finish = (event, data) => {
     if (job.done) return;
     clearTimeout(watchdog);
+    clearTimeout(approvalTimer);
+    clearTimeout(job.reconnectGrace);
+    job.decide = null;
     if (event) emit(job, event, redact(data));
     try { if (child) child.kill("SIGKILL"); } catch {}
     rmSync(work, { recursive: true, force: true });
     busy = false;
   };
-  // A deploy that hangs (stalled build, abandoned tab) must not hold the single slot forever.
-  watchdog = setTimeout(() => finish("failed", "This deploy took too long and was stopped. Please try again."), 6 * 60 * 1000);
+  const armWatchdog = () => {
+    clearTimeout(watchdog);
+    watchdog = setTimeout(() => finish("failed", "This deploy took too long and was stopped. Please try again."), 6 * 60 * 1000);
+  };
+  armWatchdog();
 
   emit(job, "log", "Fetching your code from GitHub...");
   child = spawn("git", ["clone", "--depth", "1", job.repo, appDir], { stdio: ["ignore", "pipe", "pipe"] });
@@ -289,20 +421,91 @@ function runDeploy(job, creds) {
       return finish("failed", "This needs your Vercel token to deploy to your own account. Paste it above, or add a .env.deploy to your repo.");
     }
     ensurePersonalManifest(appDir, job.slug);
-    emit(job, "log", "Handing it to the platform to put online...");
+    reviewPhase();
+  });
 
-    // Fail-closed env: force the personal profile, supply ONLY the user's tokens, and make
-    // sure nothing the portal itself holds (its own DP_TARGET, or any SUPABASE_ACCESS_TOKEN in
-    // its environment) can leak into the user's deploy.
+  // ---- phase 1: the compliance review (the gate) ----
+  function reviewPhase() {
+    if (job.done) return;
+    job.phase = "review";
+    emit(job, "log", "Checking what your app connects to before it goes live...");
+    // Deterministic facts + verdict only: fast, and never dependent on a model being reachable on
+    // this machine. The full AI brief stays a `deployctl review` feature.
+    const env = { ...process.env, NO_COLOR: "1" };
+    child = spawn("npx", ["tsx", CLI, "review", appDir, "--no-brief", "--json"], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
+    // Parse the JSON verdict from STDOUT only. stderr (tsx/npx notices, which can contain braces)
+    // is kept separate so it can never corrupt the parse, and is used only for a fallback message.
+    let out = "", err = "";
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (err += d));
+    child.on("error", () => finish("failed", "The safety review could not run, so nothing was put online. Please try again."));
+    child.on("close", () => {
+      if (job.done) return;
+      let review = null;
+      try {
+        const s = out.indexOf("{"), e = out.lastIndexOf("}");
+        if (s >= 0 && e > s) review = JSON.parse(out.slice(s, e + 1));
+      } catch {}
+      // Fail closed: if we cannot read a verdict, we do not deploy. But surface the REAL reason
+      // (almost always an invalid app.deploy.yaml, whose plain-English errors `review` prints to
+      // stdout) instead of a generic "try again" that would loop the user with no way forward.
+      if (!review || !review.verdict || !review.verdict.decision) {
+        const detail = (out.trim() || err.trim()).split("\n").slice(-12).join("\n");
+        return finish("failed", "This app needs fixing before it can go online:\n" + (detail || "The deploy file could not be read."));
+      }
+      const decision = review.verdict.decision;
+      if (decision === "blocked") return finish("rejected", rejectionText(review));
+      if (decision === "needs-review") return awaitApproval(review);
+      // allowed — the clean bill. No human approval was needed, so do NOT tell `up`'s gate it was
+      // approved: its own review re-runs and stays authoritative and fail-closed.
+      emit(job, "log", "Checked what it connects to: nothing outside its own platform. All clear.");
+      deployPhase(false);
+    });
+  }
+
+  // ---- the hold: wait for the person to approve the external systems ----
+  function awaitApproval(review) {
+    job.phase = "awaiting-approval";
+    emit(job, "approval", JSON.stringify(approvalSummary(review)));
+    // Stop the deploy watchdog while a human decides; give them a generous window.
+    clearTimeout(watchdog);
+    approvalTimer = setTimeout(
+      () => finish("failed", "No decision was made in time, so nothing was put online. You can start again when ready."),
+      10 * 60 * 1000,
+    );
+    job.decide = (choice) => {
+      if (job.done || job.phase !== "awaiting-approval") return;
+      job.decide = null;
+      clearTimeout(approvalTimer);
+      if (choice !== "approve") return finish("declined", "Okay, nothing was put online.");
+      emit(job, "log", "Approved. Putting it online...");
+      armWatchdog();
+      deployPhase(true);
+    };
+  }
+
+  // ---- phase 2: hand it to the platform to put online ----
+  // `approved` is true ONLY when a person confirmed the needs-review list. It is passed to `up`'s
+  // own gate as DP_COMPLIANCE_APPROVED; on the allowed path it is false, so `up`'s re-review stays
+  // authoritative and fail-closed (a divergent needs-review there refuses, never auto-approves).
+  function deployPhase(approved) {
+    if (job.done) return;
+    job.phase = "deploying";
+    // Fail-closed env: force the personal profile, supply ONLY the user's tokens, and make sure
+    // nothing the portal itself holds can leak into the user's deploy. We NEVER set DP_SKIP_REVIEW,
+    // so `up`'s gate always re-runs fail-closed on the server side.
     const env = { ...process.env, DP_TOKENS_ENV_ONLY: "1", DP_FORCE_PROFILE: "personal", VERCEL_TOKEN: creds.vercel, NO_COLOR: "1" };
+    if (approved) env.DP_COMPLIANCE_APPROVED = "1";
+    else delete env.DP_COMPLIANCE_APPROVED;
     if (creds.supabase) env.SUPABASE_ACCESS_TOKEN = creds.supabase;
     else delete env.SUPABASE_ACCESS_TOKEN;
     if (creds.region) env.SUPABASE_REGION = creds.region;
     else delete env.SUPABASE_REGION;
     delete env.DP_TARGET; // deploy to the user's Vercel/Supabase (personal), never the owner's VM
+    delete env.DP_SKIP_REVIEW; // the server-side gate stays on, no matter the portal's environment
 
     child = spawn("npx", ["tsx", CLI, "up", appDir], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
-    let buf = "", tailBuf = "";
+    let urlFound = "", linkSent = false, buf = "", tailBuf = "";
     const onData = (d) => {
       const s = d.toString();
       tailBuf = (tailBuf + s).slice(-2000);
@@ -327,7 +530,7 @@ function runDeploy(job, creds) {
       if (code2 === 0 && urlFound) finish("done", urlFound);
       else finish("failed", "The deploy did not finish.\n" + tail(tailBuf));
     });
-  });
+  }
 }
 
 function readBody(req) {
@@ -364,14 +567,40 @@ async function startDeploy(req, res) {
   send({ id });
 }
 
+// The person's approve/decline on the held review. Resumes the paused job either way.
+async function decideDeploy(req, res) {
+  const body = await readBody(req);
+  const send = (obj) => { try { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(obj)); } catch {} };
+  if (body.csrf !== CSRF) return send({ error: "Your session expired. Refresh the page and try again." });
+  const job = jobs.get(String(body.id || ""));
+  if (!job || typeof job.decide !== "function") {
+    return send({ error: "That deploy is no longer waiting for a decision." });
+  }
+  const choice = body.decision === "approve" ? "approve" : "decline";
+  job.decide(choice);
+  send({ ok: true });
+}
+
 function streamDeploy(req, res, q) {
   const ch = sse(res);
   const job = jobs.get(q.get("id"));
   if (q.get("csrf") !== CSRF || !job) { ch.send("failed", "That deploy is no longer available. Refresh the page and try again."); return ch.end(); }
+  // A (re)connecting watcher cancels any pending abandonment timer (below).
+  clearTimeout(job.reconnectGrace);
+  job.reconnectGrace = null;
   for (const e of job.events) ch.send(e.event, e.data);
   if (job.done) return ch.end();
   job.subs.add(ch);
-  res.on("close", () => job.subs.delete(ch));
+  res.on("close", () => {
+    job.subs.delete(ch);
+    // If the person closes the tab on the approval screen, don't pin the single deploy slot for the
+    // full 10-minute approval window. When the last watcher leaves an awaiting-approval job, give a
+    // short grace for a transient reconnect, then treat it as declined so the slot frees.
+    if (!job.done && job.phase === "awaiting-approval" && job.subs.size === 0 && typeof job.decide === "function") {
+      clearTimeout(job.reconnectGrace);
+      job.reconnectGrace = setTimeout(() => { if (job.decide) job.decide("decline"); }, GRACE_MS);
+    }
+  });
 }
 
 // ---------- server ----------
@@ -379,6 +608,7 @@ const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, "http://x");
   if (u.pathname === "/healthz") { res.writeHead(200, { "content-type": "application/json" }); return res.end(JSON.stringify({ ok: true })); }
   if (u.pathname === "/api/deploy" && req.method === "POST") return startDeploy(req, res);
+  if (u.pathname === "/api/deploy/decide" && req.method === "POST") return decideDeploy(req, res);
   if (u.pathname === "/api/deploy/stream") return streamDeploy(req, res, u.searchParams);
   if (u.pathname === "/") { res.writeHead(200, { "content-type": "text/html; charset=utf-8" }); return res.end(homePage()); }
   res.writeHead(404, { "content-type": "text/plain" });
