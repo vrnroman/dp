@@ -19,6 +19,12 @@ const { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } = require
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const { randomBytes } = require("node:crypto");
+const { createGate } = require("./auth-gate.js");
+
+// The portal's own front door. Google sign-in when configured (PORTAL_GOOGLE_CLIENT_ID +
+// PORTAL_GOOGLE_CLIENT_SECRET); otherwise a no-op, so the existing Caddy basic_auth gate keeps
+// working unchanged. Open signup by default; PORTAL_ALLOWED_EMAILS restricts it.
+const gate = createGate();
 
 const PORT = Number(process.env.PORT) || 8090;
 const HOST = process.env.HOST || "127.0.0.1";
@@ -606,7 +612,17 @@ function streamDeploy(req, res, q) {
 // ---------- server ----------
 const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, "http://x");
+  // The health probe is always open (no auth), so systemd/Caddy can check liveness.
   if (u.pathname === "/healthz") { res.writeHead(200, { "content-type": "application/json" }); return res.end(JSON.stringify({ ok: true })); }
+  // The front door. When Google sign-in is configured, this handles /auth/google*, /signin, and
+  // redirects anyone not signed in; it returns true when it fully handled the request. When it is
+  // not configured it is a no-op (Caddy basic_auth is the gate) and returns false.
+  try {
+    if (await gate.handle(req, res, u)) return;
+  } catch (e) {
+    res.writeHead(302, { location: "/signin?reason=error" });
+    return res.end();
+  }
   if (u.pathname === "/api/deploy" && req.method === "POST") return startDeploy(req, res);
   if (u.pathname === "/api/deploy/decide" && req.method === "POST") return decideDeploy(req, res);
   if (u.pathname === "/api/deploy/stream") return streamDeploy(req, res, u.searchParams);

@@ -13,7 +13,7 @@ import { Narrator } from "../ui/narrate.ts";
 import { printReceipt, printTerminalQR, writeCard } from "../ui/receipt.ts";
 import * as supabase from "../providers/supabase.ts";
 import * as vercel from "../providers/vercel.ts";
-import { runMigrations, seedAllowlist, canConnect } from "../providers/postgres.ts";
+import { runMigrations, seedAllowlist, ensureGroupsTables, canConnect } from "../providers/postgres.ts";
 import { vmConfig, pickPort, deployToVm, waitForPublic } from "../providers/gcp-vm.ts";
 
 export interface UpOptions {
@@ -122,8 +122,12 @@ export async function runUp(appDirArg: string, opts: UpOptions): Promise<number>
     return 1;
   }
   const ownerEmail = acct.email;
+  // With Google sign-in, the owner is recognized by their GOOGLE email, which can differ from the
+  // Vercel account email (e.g. Vercel-via-GitHub, or a work email). Let the owner name it so they
+  // are never locked out of their own app; default to the Vercel email as the best guess.
+  const identityOwnerEmail = (process.env.GOOGLE_OWNER_EMAIL || ownerEmail).trim().toLowerCase();
   const members = (manifest.auth?.allowlist ?? []).filter(
-    (e) => e.trim().toLowerCase() !== ownerEmail.toLowerCase(),
+    (e) => e.trim().toLowerCase() !== identityOwnerEmail.toLowerCase(),
   );
   const peopleCount = 1 + members.length;
 
@@ -145,7 +149,10 @@ export async function runUp(appDirArg: string, opts: UpOptions): Promise<number>
     // to Vercel, so we never provision (or count against the user's quota for) a database it
     // would never touch.
     const usesSupabase =
-      !!manifest.database || manifest.auth?.tier === "simple" || !!manifest.storage?.buckets?.length;
+      !!manifest.database ||
+      manifest.auth?.tier === "simple" ||
+      manifest.auth?.tier === "proper" ||
+      !!manifest.storage?.buckets?.length;
     if (usesSupabase && !tokens.supabaseAccessToken) {
       throw new Error(
         "This app needs a database, sign-in, or storage, which run on Supabase, but no Supabase access token was provided.",
@@ -180,7 +187,8 @@ export async function runUp(appDirArg: string, opts: UpOptions): Promise<number>
       // The allowlist for simple-auth also lives in Postgres, so we need a working connection
       // whenever the app has a database OR simple sign-in. Find the right pooler cluster by
       // actually connecting (DNS cannot tell the clusters apart).
-      const needsDb = !!manifest.database || manifest.auth?.tier === "simple";
+      const needsDb =
+        !!manifest.database || manifest.auth?.tier === "simple" || manifest.auth?.tier === "proper";
       if (needsDb) {
         n.start("Connecting to your database");
         for (const candidate of supabase.poolerCandidates(state.supabase.ref, state.supabase.region, state.supabase.dbPassword)) {
@@ -223,6 +231,20 @@ export async function runUp(appDirArg: string, opts: UpOptions): Promise<number>
       n.start("Putting up the front door");
       await seedAllowlist(dbUrl as string, ownerEmail, members);
       n.done(`Front door ready. ${peopleCount} ${peopleCount === 1 ? "person" : "people"} can get in for now`);
+    } else if (manifest.auth?.tier === "proper") {
+      // Google sign-in. The owner (this Vercel account) is recognized as owner; the platform's
+      // groups/people machinery lives in the app's own database. Open signup lets anyone in with
+      // the default role; invite signup limits it to the allowlist.
+      const openSignup = manifest.auth?.signup !== "invite";
+      n.start("Putting up the front door (Google sign-in)");
+      await ensureGroupsTables(dbUrl as string);
+      // Seed the owner (by their Google identity email) plus, in invite mode, the allowlist.
+      await seedAllowlist(dbUrl as string, identityOwnerEmail, openSignup ? [] : members);
+      n.done(
+        openSignup
+          ? "Front door ready. Anyone can sign in with Google; you decide what each person can do."
+          : `Front door ready. ${peopleCount} ${peopleCount === 1 ? "person" : "people"} can sign in with Google for now.`,
+      );
     }
 
     // 4. Storage
@@ -249,10 +271,57 @@ export async function runUp(appDirArg: string, opts: UpOptions): Promise<number>
       envVars.SUPABASE_SERVICE_ROLE_KEY = keys.serviceRole;
     }
     if (dbUrl) envVars.DATABASE_URL = dbUrl;
+
+    // Google sign-in (proper tier): the platform tells the app who its owner is, how strangers
+    // get in, the roles the app declared, and the URL to register with Google. The Google client
+    // id/secret come from the owner's environment (like the Vercel/Supabase tokens), and are
+    // omitted when absent — the app still deploys; sign-in turns on once they are supplied.
+    let googleMissing = false;
+    if (manifest.auth?.tier === "proper") {
+      envVars.PLATFORM_OWNER_EMAIL = identityOwnerEmail;
+      envVars.PLATFORM_SIGNUP_MODE = manifest.auth?.signup === "invite" ? "invite" : "open";
+      // Do NOT hardcode the callback origin from a guessed slug (Vercel can assign a different
+      // production domain). Only pin PLATFORM_BASE_URL when the owner names a custom domain; when
+      // unset, the binding derives the redirect_uri from the actual request host, which always
+      // matches the address the person is on (and the one the owner registers with Google).
+      if (process.env.GOOGLE_BASE_URL) {
+        envVars.PLATFORM_BASE_URL = process.env.GOOGLE_BASE_URL.replace(/\/+$/, "");
+      }
+      if (manifest.auth?.roles?.length) envVars.PLATFORM_ROLES = JSON.stringify(manifest.auth.roles);
+      if (manifest.auth?.default) envVars.PLATFORM_DEFAULT_ROLE = manifest.auth.default;
+      if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
+        envVars.GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+        envVars.GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+      } else {
+        googleMissing = true;
+      }
+    }
+
     for (const k of required) envVars[k] = process.env[k] as string;
     for (const k of manifest.env?.optional ?? []) if (process.env[k]) envVars[k] = process.env[k] as string;
     await vercel.setEnv(tokens.vercelToken, proj.id, envVars);
     n.done("Web home ready");
+    if (manifest.auth?.tier === "proper") {
+      const callback = `${(process.env.GOOGLE_BASE_URL || `https://${slug}.vercel.app`).replace(/\/+$/, "")}/auth/google/callback`;
+      if (googleMissing) {
+        process.stdout.write(
+          `\n  One more step to turn on sign-in: add your Google keys. At\n` +
+            `  https://console.cloud.google.com/apis/credentials create an OAuth client and add this\n` +
+            `  exact "Authorized redirect URI":\n` +
+            `    ${callback}\n` +
+            `  (if your live address is not ${slug}.vercel.app, register that one, or set GOOGLE_BASE_URL).\n` +
+            `  Then set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and run this again. You are the owner\n` +
+            `  as ${identityOwnerEmail} (set GOOGLE_OWNER_EMAIL if you sign in with a different Google\n` +
+            `  account). Until then the app is live but "Continue with Google" will not sign anyone in.\n\n`,
+        );
+      } else {
+        process.stdout.write(
+          `\n  Google sign-in is on. Make sure this exact redirect URI is registered in your Google\n` +
+            `  OAuth client: ${callback}\n` +
+            `  You are the owner as ${identityOwnerEmail}.\n\n`,
+        );
+      }
+    }
 
     // 6. Build and ship
     n.start("Sending your app live (building and shipping, about a minute)");
@@ -454,6 +523,12 @@ function printPlan(
   if (manifest.database) lines.push(`  Create your own database and set up your tables.`);
   if (manifest.auth?.tier === "simple")
     lines.push(`  Put up a front door. ${peopleCount} ${peopleCount === 1 ? "person" : "people"} can get in (you are the owner: ${ownerEmail}).`);
+  if (manifest.auth?.tier === "proper")
+    lines.push(
+      manifest.auth?.signup === "invite"
+        ? `  Put up a Google sign-in. Only the people you invite can get in (you are the owner: ${ownerEmail}).`
+        : `  Put up a Google sign-in. Anyone can sign in; you decide what each person can do (you are the owner: ${ownerEmail}).`,
+    );
   if (manifest.storage?.buckets?.length) lines.push(`  Set up storage for photos and files.`);
   lines.push("");
   lines.push(`  Everything runs on the free tier in ${region}. Run without --dry-run to do it for real.`);

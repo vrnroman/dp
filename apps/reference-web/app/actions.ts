@@ -5,22 +5,16 @@ import { redirect } from "next/navigation";
 import {
   getUser,
   requireUser,
-  signInWithEmail,
+  requireRole,
   signOut,
-  inviteToAllowlist,
-  removeFromAllowlist,
+  createGroup,
+  deleteGroup,
+  addPersonToGroup,
+  removePersonFromGroup,
+  setGroupRoles,
 } from "@platform/auth/next";
 import { addNote } from "../lib/db.ts";
 import { uploadPhoto } from "../lib/storage.ts";
-
-export async function doSignIn(formData: FormData): Promise<void> {
-  const email = String(formData.get("email") ?? "");
-  const result = await signInWithEmail(email);
-  if (!result.ok) {
-    redirect(`/signin?reason=${result.reason}`);
-  }
-  redirect("/");
-}
 
 export async function doSignOut(): Promise<void> {
   await signOut();
@@ -28,7 +22,9 @@ export async function doSignOut(): Promise<void> {
 }
 
 export async function postNote(formData: FormData): Promise<void> {
-  const user = await requireUser();
+  // Leaving a note needs the "editor" role. Everyone can read (the default "viewer" role);
+  // only people the owner put in an editor group can post.
+  const user = await requireRole("editor");
   const body = String(formData.get("body") ?? "").trim();
   if (!body) redirect("/");
 
@@ -44,18 +40,42 @@ export async function postNote(formData: FormData): Promise<void> {
   redirect("/");
 }
 
-export async function invite(formData: FormData): Promise<void> {
-  await requireUser();
-  const email = String(formData.get("email") ?? "").trim();
-  if (email) await inviteToAllowlist(email);
+/* ---- the owner's "who can do what" screen (groups) ---- */
+
+export async function makeGroup(formData: FormData): Promise<void> {
+  const name = String(formData.get("name") ?? "").trim();
+  if (name) await createGroup(name);
   revalidatePath("/settings");
   redirect("/settings");
 }
 
-export async function removeMember(formData: FormData): Promise<void> {
-  await requireUser();
+export async function removeGroup(formData: FormData): Promise<void> {
+  const id = String(formData.get("groupId") ?? "");
+  if (id) await deleteGroup(id);
+  revalidatePath("/settings");
+  redirect("/settings");
+}
+
+export async function addToGroup(formData: FormData): Promise<void> {
+  const id = String(formData.get("groupId") ?? "");
+  const email = String(formData.get("email") ?? "").trim();
+  if (id && email) await addPersonToGroup(id, email);
+  revalidatePath("/settings");
+  redirect("/settings");
+}
+
+export async function takeFromGroup(formData: FormData): Promise<void> {
+  const id = String(formData.get("groupId") ?? "");
   const email = String(formData.get("email") ?? "");
-  if (email) await removeFromAllowlist(email);
+  if (id && email) await removePersonFromGroup(id, email);
+  revalidatePath("/settings");
+  redirect("/settings");
+}
+
+export async function chooseGroupRoles(formData: FormData): Promise<void> {
+  const id = String(formData.get("groupId") ?? "");
+  const roles = formData.getAll("role").map((r) => String(r));
+  if (id) await setGroupRoles(id, roles);
   revalidatePath("/settings");
   redirect("/settings");
 }

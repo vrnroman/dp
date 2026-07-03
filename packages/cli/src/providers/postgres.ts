@@ -7,6 +7,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import pg from "pg";
 import { ALLOWLIST_SCHEMA, ALLOWLIST_TABLE } from "@platform/auth/pg-store";
+import { GROUPS_SCHEMA } from "@platform/auth/pg-groups";
 
 const TRACK = "platform_migrations";
 
@@ -103,6 +104,20 @@ export async function seedAllowlist(
         [email],
       );
     }
+  } finally {
+    await client.end();
+  }
+}
+
+/**
+ * Create the groups/people tables the `proper` (Google) tier needs: named groups, who is in
+ * them, which roles each grants, and a directory of who has signed in. Idempotent.
+ */
+export async function ensureGroupsTables(connUrl: string): Promise<void> {
+  const client = clientFor(connUrl);
+  await client.connect();
+  try {
+    await client.query(GROUPS_SCHEMA);
   } finally {
     await client.end();
   }

@@ -9,7 +9,7 @@
   ],
   "scripts": {
     "deployctl": "tsx packages/cli/src/index.ts",
-    "test": "node --import tsx --test packages/**/test/*.test.ts",
+    "test": "node --import tsx --test packages/**/test/*.test.ts apps/**/test/*.test.ts",
     "check": "tsx packages/cli/src/index.ts check"
   },
   "devDependencies": {

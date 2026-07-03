@@ -55,7 +55,14 @@ const SECRET_PATTERNS: Array<{ re: RegExp; name: string }> = [
   { re: /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{8,}/, name: "what looks like a Supabase or JWT key" },
   { re: /sk-[A-Za-z0-9]{24,}/, name: "what looks like an API secret key" },
   { re: /SUPABASE_SERVICE_ROLE_KEY\s*[:=]\s*['"`]eyJ/, name: "a hardcoded service role key" },
+  // Google OAuth client secret. Catches a hardcoded secret; reading it from process.env passes.
+  { re: /GOCSPX-[A-Za-z0-9_-]{10,}/, name: "a hardcoded Google sign-in client secret" },
 ];
+
+// Where the app checks a role in code. The platform's SDK exposes exactly these two calls, so a
+// role name that reaches production always flows through one of them — which is what lets the
+// checker compare code against the roles the manifest declared.
+const ROLE_CALL_RE = /\b(?:requireRole|userHasRole)\(\s*["'`]([A-Za-z0-9_-]+)["'`]/g;
 
 export function checkApp(appDir: string): CheckReport {
   const findings: Finding[] = [];
@@ -213,6 +220,53 @@ export function checkApp(appDir: string): CheckReport {
           fix: `Add 'web:' then 'framework: nextjs' to app.deploy.yaml (or vite, remix, astro), and make sure that framework is installed.`,
         });
       }
+    }
+  }
+
+  // 7. Roles: the app builder declares roles in the manifest and only checks THOSE roles in code.
+  //    Mapping people to roles is the platform's job, not the app's, so the one thing that can go
+  //    wrong on the app side is a role checked in code that was never declared (a typo, or a role
+  //    they forgot to add). That is a real hole — an ungated door — so it is fail-closed here.
+  {
+    const declared = new Set((manifest.auth?.roles ?? []).map((r) => r.name));
+    const usedInCode = new Map<string, string>(); // role -> first file it appears in
+    for (const file of files) {
+      let text: string;
+      try {
+        text = readFileSync(file, "utf8");
+      } catch {
+        continue;
+      }
+      ROLE_CALL_RE.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = ROLE_CALL_RE.exec(text))) {
+        if (!usedInCode.has(m[1])) usedInCode.set(m[1], relative(appDir, file));
+      }
+    }
+
+    for (const [role, where] of usedInCode) {
+      if (!declared.has(role)) {
+        findings.push({
+          level: "error",
+          where,
+          problem: `The code checks for the role "${role}", but no role by that name is declared in ${MANIFEST_FILE}. That door would never open for anyone.`,
+          fix: `Add "${role}" under 'auth.roles' in ${MANIFEST_FILE} (with a plain 'can:' line), or fix the name in the code to match a declared role${declared.size ? ` (${[...declared].join(", ")})` : ""}.`,
+        });
+      }
+    }
+    // A declared role that nothing checks is probably dead, but not dangerous: flag gently.
+    for (const role of declared) {
+      if (!usedInCode.has(role) && role !== manifest.auth?.default) {
+        findings.push({
+          level: "warn",
+          where: MANIFEST_FILE,
+          problem: `The role "${role}" is declared but the app never checks for it, so it currently grants nothing.`,
+          fix: `Gate something with requireRole("${role}"), or remove the role from ${MANIFEST_FILE} if it is not needed.`,
+        });
+      }
+    }
+    if (declared.size > 0 && usedInCode.size > 0 && ![...usedInCode.keys()].some((r) => !declared.has(r))) {
+      passed.push(`Every role the code checks is declared (${declared.size} role${declared.size === 1 ? "" : "s"}).`);
     }
   }
 

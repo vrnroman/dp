@@ -6,7 +6,10 @@
   "exports": {
     ".": "./src/index.ts",
     "./next": "./src/next.ts",
-    "./pg-store": "./src/pg-store.ts"
+    "./oauth": "./src/oauth.ts",
+    "./roles": "./src/roles.ts",
+    "./pg-store": "./src/pg-store.ts",
+    "./pg-groups": "./src/pg-groups.ts"
   },
   "peerDependencies": {
     "next": ">=14",

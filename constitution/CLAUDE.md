@@ -48,9 +48,14 @@ database:               # include only if the app saves data
   engine: postgres
   migrations: ./migrations
 auth:                   # include only if the app has sign-in
-  tier: simple          # none | simple | proper
-  allowlist:            # optional people to let in besides the owner
-    - friend@example.com
+  tier: proper          # none | simple | proper. 'proper' is Google sign-in (use this).
+  signup: open          # open (anyone can sign in) | invite (only people the owner lets in)
+  roles:                # the roles YOUR app understands. Name each one and say what it can do.
+    - name: editor
+      can: post and edit
+    - name: viewer
+      can: only read
+  default: viewer        # the role everyone who signs in gets. Must be one of roles above.
 storage:                # include only if the app stores files
   buckets:
     - photos
@@ -87,14 +92,39 @@ app.
 **Use the platform SDK for identity. Never roll your own login.**
 
 ```ts
-import { getUser, requireUser } from "@platform/auth/next";
+import { getUser, requireUser, requireRole } from "@platform/auth/next";
 
-const user = await getUser();           // who is signed in, or null
+const user = await getUser();           // who is signed in, or null (has .email, .name)
+await requireUser();                    // throws if nobody is signed in
+await requireRole("editor");            // throws unless the person can do the "editor" things
 ```
 
-This is what lets the same app work with a simple allowlist today and company sign-in later,
-with no code change. For the `simple` tier, the platform manages the allowlist and the
-"let my mom in" screen for you. You just call `getUser()` and `requireUser()`.
+Sign-in is Google (`tier: proper`). The platform ships the whole front door: the "Continue with
+Google" screen, the sign-in, the session, and the owner's "who's in" screen. You do not build a
+login, an allowlist, or a settings page. Two route files, copied verbatim, are all the wiring:
+
+```ts
+// app/auth/google/route.ts
+export { googleStart as GET } from "@platform/auth/next";
+// app/auth/google/callback/route.ts
+export { googleCallback as GET } from "@platform/auth/next";
+```
+
+**Roles: you declare them, the platform assigns them.** This is the whole division of labor.
+Your job is one thing: name the roles your app understands in `app.deploy.yaml`, each with a
+plain-English line of what it can do (`editor: post and edit`). Then gate your code with
+`requireRole("editor")` and read `getUser()` for who's signed in. That is all the app does.
+
+Everything else is the platform's job, not yours: real people (verified by Google), the named
+**groups** the owner sorts them into, and the mapping from a group to the roles it grants. The
+owner does that on a screen the platform provides. You never write group or permission code, and
+you never store a list of who is an admin. A person's roles are resolved live, so the moment the
+owner moves someone between groups, it takes effect. Everyone who signs in gets the `default`
+role; `signup: open` lets anyone sign in, `signup: invite` limits it to people the owner adds.
+
+The check (`deployctl check`) reads every `requireRole("x")` in your code and refuses to deploy
+if `x` is not one of the roles you declared, so a typo can never leave a door that opens for
+no one.
 
 **Saved data lives in Postgres, reached through `DATABASE_URL`.** Put your schema in
 `./migrations` as plain, numbered `.sql` files (`0001_init.sql`, `0002_add_photos.sql`).
@@ -112,7 +142,7 @@ You do not choose these. The platform does. Build for them:
 
 - **Next.js** (App Router) for the web app.
 - **Postgres** for saved data, reached with the `pg` client and `DATABASE_URL`.
-- **`@platform/auth`** for sign-in and the allowlist.
+- **`@platform/auth`** for Google sign-in, roles, and the owner's "who's in" screen.
 - **PWA** manifest, icon, and theme color so it installs on a phone.
 
 Keep dependencies few. Prefer the boring, proven choice. The less the app invents, the more

@@ -56,11 +56,38 @@ questions.
   **Still a seed policy.** The banned list (heavyweight headless browsers) and outbound allowlist are
   example rules; a real org tightens them (see Next).
 
+- **Google sign-in, app-declared roles, and platform-managed groups (built, verified).** Identity
+  moved from trust-on-entry email to real **Google OAuth**: a proper authorization-code flow (state
+  CSRF, PKCE, nonce) with **real id_token verification** (RS256 signature against Google's JWKS, plus
+  issuer / audience / expiry / nonce), fail-closed on every doubt. The division of responsibility the
+  owner asked for: an app builder **only declares roles** in `app.deploy.yaml` (`auth.roles: [{name,
+  can}]` + `default`, `signup: open|invite`); the **platform** owns the rest, shipped into each app as
+  `@platform/auth` with its tables in that app's own Postgres: real people (verified by Google), named
+  **groups** the owner sorts them into, and the **group→role mapping**. A person's roles resolve LIVE
+  from group membership (moving someone takes effect at once) and fail-closed against the declared set
+  (an unmapped or stale role never grants). Open signup by default: anyone with Google gets in with the
+  default role. The **checking process** was updated to match: the manifest parser + JSON schema
+  validate roles; conformance greps every `requireRole("x")` and refuses to deploy an undeclared role
+  (a typo that would open a door for no one), and the secret scanner now catches a hardcoded Google
+  client secret while injected-env usage passes. The **builder constitution** (`constitution/CLAUDE.md`)
+  documents the whole "you declare, the platform assigns" contract. The **portal itself** gained a
+  zero-dependency Google front door (`apps/portal/auth-gate.js`) behind a flag, with basic_auth as the
+  fail-safe fallback when unconfigured. Verified: 96 unit tests (incl. downgrade/alg-confusion/tamper/
+  wrong-aud/expired/replay attacks all refused), a full mock-OAuth sign-in through the portal gate, the
+  groups SQL (schema, joins, cascade, fail-closed resolution) against a real Postgres (PGlite), and a
+  clean host-style build of the reference app. NOT YET ACTIVATED live: registering a Google OAuth
+  client (owner's Google account) and flipping the live portal from basic_auth to Google — the two
+  owner actions below.
+
 ## Next (deferred, rough priority)
 
-1. **Real sign-in for the portal** — today it sits behind one shared password. With users'
-   own keys in flight, move to Google sign-in (oauth2-proxy) before opening it beyond the
-   owner, and give each person their own space.
+1. **Activate Google sign-in live (owner actions).** The mechanism is built and verified; what remains
+   needs the owner's own credentials. (a) Register a Google OAuth client (client id/secret) in the
+   owner's Google Cloud, add the app/portal callback URLs as authorized redirects. (b) Set
+   `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` for app deploys, and `PORTAL_GOOGLE_CLIENT_ID`/`_SECRET`
+   to flip the live portal (`bash scripts/deploy-portal.sh` with those set drops basic_auth for Google).
+   Then: **groups next step** — the portal owner creating groups and adding people is built at the
+   library level; a portal-owner-facing groups screen (beyond the per-app one) is the follow-on.
 2. **Harden the compliance gate into the real org policy.** Activation is done (see Done): the gate
    is fail-closed in `deployctl up` and the portal shows concrete dependencies for approve/decline.
    What remains is org-strength policy: (c) a real, org-authored policy instead of the seed default

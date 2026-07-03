@@ -12,10 +12,14 @@ database:
   migrations: ./migrations
 
 auth:
-  tier: simple
-  # The owner is added automatically on deploy. These people get in too.
-  allowlist:
-    - friend@example.com
+  tier: proper          # Google sign-in with a verified identity
+  signup: open          # anyone can sign in; the owner decides what each person can do
+  roles:                # the app declares roles; the platform maps people to them
+    - name: viewer
+      can: read the guestbook
+    - name: editor
+      can: leave notes
+  default: viewer        # everyone who signs in can read
 
 storage:
   buckets:

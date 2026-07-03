@@ -14,9 +14,10 @@ import { PGlite } from "@electric-sql/pglite";
 import { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import pg from "pg";
 
-import { runMigrations, seedAllowlist, canConnect } from "../packages/cli/src/providers/postgres.ts";
+import { runMigrations, seedAllowlist, ensureGroupsTables, canConnect } from "../packages/cli/src/providers/postgres.ts";
 import { PgAllowlist } from "@platform/auth/pg-store";
-import { authorize } from "@platform/auth";
+import { PgGroupsStore } from "@platform/auth/pg-groups";
+import { authorize, resolveRoles } from "@platform/auth";
 import { addNote, listNotes } from "../apps/reference-web/lib/db.ts";
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -54,6 +55,9 @@ async function main() {
 
     // 3. Allowlist seeding (the front door), exactly as `up` seeds it.
     await seedAllowlist(URL, "owner@example.com", ["friend@example.com", "owner@example.com"]);
+    // Create the groups/people schema now, while each setup step still uses its own short-lived
+    // connection (PGlite serves one at a time; the long-lived pool below must be the only one).
+    await ensureGroupsTables(URL);
     const pool = new pg.Pool({ connectionString: URL, max: 1 });
     const store = new PgAllowlist(pool);
 
@@ -81,7 +85,42 @@ async function main() {
     assert.equal(await store.find("guest@example.com"), null);
     ok("Adding and removing people works.");
 
+    // 5b. The groups machinery (the proper/Google tier): real schema, real joins. Mapping people
+    //     to roles is the platform's job; this is that job running against real Postgres.
+    const groups = new PgGroupsStore(pool);
+    const editors = await groups.createGroup("Editors");
+    assert.equal((await groups.createGroup("Editors")).id, editors.id); // idempotent on name
+    await groups.addToGroup(editors.id, "Friend@example.com"); // stored case-insensitively
+    await groups.setGroupRoles(editors.id, ["editor", "bogus"]);
+    const granted = await groups.grantedRolesForEmail("friend@example.com");
+    assert.ok(granted.includes("editor"), "the SQL join returns the granted role");
+    ok("Groups: an added member's granted roles come back from a real SQL join.");
+
+    // Fail-closed: a role the app never declared ("bogus") is dropped at resolution.
+    const resolved = resolveRoles({ isOwner: false, defaultRole: "viewer", grantedRoles: granted, declaredRoles: ["viewer", "editor"] });
+    assert.deepEqual(resolved, ["editor", "viewer"]);
+    ok("Roles resolve fail-closed against the declared set (an undeclared grant is dropped).");
+
+    await groups.removeFromGroup(editors.id, "friend@example.com");
+    assert.deepEqual(await groups.grantedRolesForEmail("friend@example.com"), []);
+    ok("Removing someone from a group revokes their roles immediately (live resolution).");
+
+    // Deleting the group cascades to its members and role mappings (no orphans).
+    await groups.addToGroup(editors.id, "someone@example.com");
+    await groups.deleteGroup(editors.id);
+    assert.equal((await groups.listGroups()).length, 0);
+    assert.deepEqual(await groups.grantedRolesForEmail("someone@example.com"), []);
+    ok("Deleting a group cascades cleanly (members and role mappings go with it).");
+
+    await groups.recordPerson({ email: "New@example.com", name: "New Person" });
+    const ppl = await groups.listPeople();
+    assert.ok(ppl.some((p) => p.email === "new@example.com" && p.name === "New Person"));
+    ok("The people directory records who has signed in (the 'just arrived' list).");
+
     await pool.end();
+    // PGlite serves ONE connection at a time; give its server a beat to fully release the pool's
+    // socket before lib/db opens its own, so the handoff does not race into an ECONNRESET.
+    await new Promise((r) => setTimeout(r, 200));
 
     // 6. The app's real write + read path (lib/db.ts), against real Postgres. Done last so
     // the app's lazy pool is the only open connection (PGlite serves one at a time).

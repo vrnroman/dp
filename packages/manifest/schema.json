@@ -31,7 +31,21 @@
       "required": ["tier"],
       "properties": {
         "tier": { "enum": ["none", "simple", "proper"] },
-        "allowlist": { "type": "array", "items": { "type": "string", "format": "email" } }
+        "allowlist": { "type": "array", "items": { "type": "string", "format": "email" } },
+        "signup": { "enum": ["open", "invite"] },
+        "roles": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "can"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,29}$" },
+              "can": { "type": "string" }
+            }
+          }
+        },
+        "default": { "type": "string" }
       }
     },
     "storage": {

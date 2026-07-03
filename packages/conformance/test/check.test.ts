@@ -2,6 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { checkApp } from "../src/index.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
@@ -68,6 +70,26 @@ test("a web app that claims a framework it has not installed is refused up front
     ),
     "the missing next dependency must be flagged with a fix",
   );
+});
+
+test("a role checked in code but never declared in the manifest is refused", () => {
+  const report = checkApp(join(root, "fixtures", "role-typo"));
+  assert.equal(report.ok, false);
+  const err = report.findings.find((f) => f.level === "error" && /role "editer"/i.test(f.problem));
+  assert.ok(err, "the undeclared role checked in code must be an error");
+  assert.match(err!.fix, /editor/); // the fix points at the real declared roles
+});
+
+test("a hardcoded Google client secret is caught", () => {
+  // Inline temp app: a source file with a literal GOCSPX- secret must be flagged.
+  const dir = mkdtempSync(join(tmpdir(), "conf-secret-"));
+  writeFileSync(join(dir, "app.deploy.yaml"), "name: leaky-oauth\nblueprint: web\nweb:\n  framework: nextjs\n");
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { build: "next build" }, dependencies: { next: "15.0.0" } }));
+  mkdirSync(join(dir, "lib"));
+  writeFileSync(join(dir, "lib", "oauth.ts"), `export const CLIENT_SECRET = "GOCSPX-abcdEFGH1234ijklMNOP5678";\n`);
+  const report = checkApp(dir);
+  assert.equal(report.ok, false);
+  assert.ok(report.findings.some((f) => f.level === "error" && /Google sign-in client secret/i.test(f.problem)));
 });
 
 test("an app with no manifest is a single clear error", () => {

@@ -1,0 +1,13 @@
+name: role-typo
+blueprint: web
+web:
+  framework: nextjs
+auth:
+  tier: proper
+  signup: open
+  roles:
+    - name: viewer
+      can: only read
+    - name: editor
+      can: post and edit
+  default: viewer

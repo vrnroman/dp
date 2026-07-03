@@ -57,3 +57,108 @@ test("invalid yaml does not throw", () => {
   assert.equal(manifest, null);
   assert.ok(issues.length > 0);
 });
+
+test("a proper-tier manifest with roles, signup, and default parses", () => {
+  const { manifest, issues } = parseManifest(`
+name: recipe-box
+blueprint: web
+web:
+  framework: nextjs
+auth:
+  tier: proper
+  signup: open
+  roles:
+    - name: viewer
+      can: only read
+    - name: editor
+      can: post and edit recipes
+    - name: admin
+      can: everything, including deleting
+  default: viewer
+`);
+  assert.equal(issues.length, 0, JSON.stringify(issues));
+  assert.equal(manifest?.auth?.tier, "proper");
+  assert.equal(manifest?.auth?.signup, "open");
+  assert.equal(manifest?.auth?.default, "viewer");
+  assert.equal(manifest?.auth?.roles?.length, 3);
+  assert.equal(manifest?.auth?.roles?.[1].can, "post and edit recipes");
+});
+
+test("a default role that is not declared is rejected", () => {
+  const { issues } = parseManifest(`
+name: recipe-box
+blueprint: web
+auth:
+  tier: proper
+  roles:
+    - name: viewer
+      can: only read
+  default: superadmin
+`);
+  assert.ok(issues.some((i) => i.path === "auth.default"));
+});
+
+test("a role without a description is rejected", () => {
+  const { issues } = parseManifest(`
+name: recipe-box
+blueprint: web
+auth:
+  tier: proper
+  roles:
+    - name: editor
+      can: ""
+`);
+  assert.ok(issues.some((i) => i.path.startsWith("auth.roles")));
+});
+
+test("a bad role name is rejected", () => {
+  const { issues } = parseManifest(`
+name: recipe-box
+blueprint: web
+auth:
+  tier: proper
+  roles:
+    - name: "Super Admin"
+      can: everything
+`);
+  assert.ok(issues.some((i) => i.path.includes("roles") && i.path.includes("name")));
+});
+
+test("roles with no sign-in (tier none) are rejected", () => {
+  const { issues } = parseManifest(`
+name: recipe-box
+blueprint: web
+auth:
+  tier: none
+  roles:
+    - name: editor
+      can: post
+`);
+  assert.ok(issues.some((i) => i.path === "auth"));
+});
+
+test("an unknown signup mode is rejected", () => {
+  const { issues } = parseManifest(`
+name: recipe-box
+blueprint: web
+auth:
+  tier: proper
+  signup: sometimes
+`);
+  assert.ok(issues.some((i) => i.path === "auth.signup"));
+});
+
+test("duplicate role names are caught", () => {
+  const { issues } = parseManifest(`
+name: recipe-box
+blueprint: web
+auth:
+  tier: proper
+  roles:
+    - name: editor
+      can: post
+    - name: editor
+      can: post again
+`);
+  assert.ok(issues.some((i) => i.path.includes("roles") && i.problem.includes("twice")));
+});

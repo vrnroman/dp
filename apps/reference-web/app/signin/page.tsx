@@ -1,9 +1,13 @@
 import Link from "next/link";
-import { doSignIn } from "../actions.ts";
 
+// Plain-English reasons the front door might turn someone away. Never jargon.
 const messages: Record<string, string> = {
-  "not-allowed": "That email is not on the list yet. Ask the owner to let you in.",
-  "invalid-email": "That does not look like an email address. Try again.",
+  "not-allowed": "You are not on the guest list yet. Ask the owner to let you in.",
+  cancelled: "No problem, nothing happened. You can try again whenever you like.",
+  expired: "That took a little too long. Please try signing in again.",
+  "bad-state": "Something did not line up. Please try signing in again.",
+  "bad-callback": "Something did not line up. Please try signing in again.",
+  "verify-failed": "We could not confirm that sign-in. Please try again.",
 };
 
 export default async function SignIn({
@@ -12,7 +16,7 @@ export default async function SignIn({
   searchParams: Promise<{ reason?: string }>;
 }) {
   const { reason } = await searchParams;
-  const message = reason ? messages[reason] : null;
+  const message = reason ? messages[reason] ?? "Please try signing in again." : null;
 
   return (
     <main>
@@ -25,15 +29,14 @@ export default async function SignIn({
 
       {message && <div className="banner">{message}</div>}
 
-      <form className="card" action={doSignIn}>
+      <div className="card">
         <p className="muted" style={{ marginTop: 0 }}>
-          Enter your email. If you are on the list, you are in.
+          Sign in to leave a note. It takes one tap.
         </p>
-        <div className="field">
-          <input type="email" name="email" placeholder="you@example.com" required autoFocus />
-        </div>
-        <button type="submit">Let me in</button>
-      </form>
+        <a className="btn" href="/auth/google" style={{ display: "inline-block" }}>
+          Continue with Google
+        </a>
+      </div>
     </main>
   );
 }

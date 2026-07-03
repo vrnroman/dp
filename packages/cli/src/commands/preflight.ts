@@ -65,7 +65,10 @@ export function buildTimeEnv(manifest: Manifest, source: NodeJS.ProcessEnv = pro
     env.DATABASE_URL = `postgresql://placeholder:placeholder@127.0.0.1:5432/${manifest.name}`;
   }
   const usesSupabase =
-    !!manifest.database || manifest.auth?.tier === "simple" || !!manifest.storage?.buckets?.length;
+    !!manifest.database ||
+    manifest.auth?.tier === "simple" ||
+    manifest.auth?.tier === "proper" ||
+    !!manifest.storage?.buckets?.length;
   if (usesSupabase) {
     env.SUPABASE_URL = "https://placeholder.supabase.co";
     env.SUPABASE_ANON_KEY = PLACEHOLDER;
@@ -73,6 +76,16 @@ export function buildTimeEnv(manifest: Manifest, source: NodeJS.ProcessEnv = pro
   }
   // `up` always sets the auth secret, whatever the tier.
   env.PLATFORM_AUTH_SECRET = PLACEHOLDER;
+
+  // The Google (proper) tier reads these at runtime, but define them at build so a page that
+  // imports the identity SDK at module scope does not trip on an undefined variable.
+  if (manifest.auth?.tier === "proper") {
+    env.PLATFORM_OWNER_EMAIL = "owner@placeholder.example";
+    env.PLATFORM_SIGNUP_MODE = manifest.auth?.signup === "invite" ? "invite" : "open";
+    env.PLATFORM_BASE_URL = `https://${manifest.name}.vercel.app`;
+    if (manifest.auth?.roles?.length) env.PLATFORM_ROLES = JSON.stringify(manifest.auth.roles);
+    if (manifest.auth?.default) env.PLATFORM_DEFAULT_ROLE = manifest.auth.default;
+  }
 
   // The app's own declared secrets win over any placeholder.
   for (const k of manifest.env?.required ?? []) {

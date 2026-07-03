@@ -17,12 +17,22 @@ export type Role = "owner" | "member";
 
 export interface User {
   email: string;
+  /** account tier: the owner (who deployed the app) vs everyone else. Distinct from app roles,
+   *  which are declared by the app and resolved live from group membership (see ./roles). */
   role: Role;
+  /** verified identity fields, present when sign-in came from Google (the `proper` tier). */
+  name?: string;
+  /** Google's stable account id. */
+  sub?: string;
+  picture?: string;
 }
 
 export interface SessionPayload {
   email: string;
   role: Role;
+  name?: string;
+  sub?: string;
+  picture?: string;
   /** unix seconds */
   exp: number;
 }
@@ -46,6 +56,9 @@ export function signSession(
   if (!secret) throw new Error("A session secret is required to sign sessions.");
   const now = nowSeconds ?? Math.floor(currentMillis() / 1000);
   const payload: SessionPayload = { email: user.email, role: user.role, exp: now + ttlSeconds };
+  if (user.name) payload.name = user.name;
+  if (user.sub) payload.sub = user.sub;
+  if (user.picture) payload.picture = user.picture;
   const body = b64url(JSON.stringify(payload));
   const sig = createHmac("sha256", secret).update(body).digest("base64url");
   return `${body}.${sig}`;
@@ -73,7 +86,11 @@ export function verifySession(
   const now = nowSeconds ?? Math.floor(currentMillis() / 1000);
   if (typeof payload.exp !== "number" || payload.exp < now) return null;
   if (typeof payload.email !== "string") return null;
-  return { email: payload.email, role: payload.role === "owner" ? "owner" : "member" };
+  const user: User = { email: payload.email, role: payload.role === "owner" ? "owner" : "member" };
+  if (typeof payload.name === "string") user.name = payload.name;
+  if (typeof payload.sub === "string") user.sub = payload.sub;
+  if (typeof payload.picture === "string") user.picture = payload.picture;
+  return user;
 }
 
 function constantTimeEqual(a: string, b: string): boolean {
