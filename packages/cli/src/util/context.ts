@@ -93,7 +93,16 @@ export function prepareDeployContext(appDir: string): DeployContext {
     ensure("@types/node", "^20");
     ensure("@types/react", `^${reactMajor}`);
     ensure("@types/react-dom", `^${reactMajor}`);
+    // The platform's auth binding uses `pg`; a TS build type-checks it and needs the pg types.
+    if (all.pg) ensure("@types/pg", "^8");
     pkg.devDependencies = dev;
+
+    // The platform's own vendored packages (@platform/*) import with explicit `.ts` extensions,
+    // which a modern TypeScript's type-check (run by `next build`) rejects unless the tsconfig
+    // opts in. Since the platform is what vendors that code, it enables the option on the deploy
+    // copy (valid because a Next build never emits via tsc). Without this, the app's build dies on
+    // the vendored source under any TypeScript newer than the pin the reference app happens to use.
+    if (vendored) allowTsExtensions(join(tmp, "tsconfig.json"));
   }
 
   writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
@@ -102,6 +111,24 @@ export function prepareDeployContext(appDir: string): DeployContext {
   writeFileSync(join(tmp, ".vercelignore"), ["node_modules", ".next", ".git", ".deploy-state.json"].join("\n") + "\n");
 
   return { dir: tmp };
+}
+
+/** Enable `.ts`-extension imports on the deploy copy's tsconfig (the vendored @platform/* source
+ *  uses them). Patches an existing tsconfig; if there is none, writes a minimal one Next will
+ *  extend. `noEmit` is required for the option and is always correct for a Next app. */
+function allowTsExtensions(tsconfigPath: string): void {
+  let cfg: { compilerOptions?: Record<string, unknown> } = {};
+  if (existsSync(tsconfigPath)) {
+    try {
+      cfg = JSON.parse(readFileSync(tsconfigPath, "utf8"));
+    } catch {
+      cfg = {};
+    }
+  }
+  cfg.compilerOptions = cfg.compilerOptions ?? {};
+  cfg.compilerOptions.allowImportingTsExtensions = true;
+  cfg.compilerOptions.noEmit = true;
+  writeFileSync(tsconfigPath, JSON.stringify(cfg, null, 2) + "\n");
 }
 
 /** The leading major version from a semver range like "^19.0.0" / "19" / "~18.2". Null if none. */

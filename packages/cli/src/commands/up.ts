@@ -362,6 +362,30 @@ export async function runUp(appDirArg: string, opts: UpOptions): Promise<number>
     });
     state.url = outcome.url;
     writeState(appDir, state);
+
+    // Relay mode: register the ACTUAL production origin now that we know it. Vercel can assign a
+    // suffixed domain (e.g. <slug>-five.vercel.app), so the deploy-time guess is often wrong; the
+    // app derives its origin from the request, so the relay must have the real one allowlisted or
+    // sign-in would fail closed. Best-effort, and it updates the record `down` deregisters.
+    if (relayActive && outcome.url) {
+      const relayBase = (process.env.DP_RELAY_URL || "").replace(/\/+$/, "");
+      const adminToken = process.env.DP_RELAY_ADMIN_TOKEN || "";
+      if (relayBase && adminToken) {
+        try {
+          const realOrigin = new URL(outcome.url).origin;
+          await fetch(`${relayBase}/auth/relay/register`, {
+            method: "POST",
+            headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+            body: JSON.stringify({ origin: realOrigin }),
+            signal: AbortSignal.timeout(8000),
+          });
+          state.relay = { origin: realOrigin, url: relayBase };
+          writeState(appDir, state);
+        } catch {
+          /* the deploy-time guess is already registered; a mismatch is surfaced by the app if any */
+        }
+      }
+    }
     n.done("Your app is live");
 
     // 7. The Deed

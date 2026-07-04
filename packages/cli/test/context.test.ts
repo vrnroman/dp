@@ -59,6 +59,23 @@ test("a plain JavaScript app gets NO toolchain added", () => {
   assert.ok(!dev.typescript, "a JS app should not get typescript");
 });
 
+test("a TS app that vendors @platform/* gets @types/pg and .ts-extension imports enabled", () => {
+  const dir = app({
+    "package.json": JSON.stringify({
+      name: "t",
+      dependencies: { next: "15.5.0", react: "18.3.1", "react-dom": "18.3.1", pg: "^8", "@platform/auth": "*" },
+    }),
+    "tsconfig.json": JSON.stringify({ compilerOptions: { moduleResolution: "bundler", jsx: "preserve" } }),
+    "app/page.tsx": "export default function P(){return null}",
+  });
+  const ctx = prepareDeployContext(dir).dir;
+  const pkg = pkgOf(ctx);
+  assert.equal(pkg.devDependencies["@types/pg"], "^8", "the pg types must be provided for the vendored auth binding");
+  const tsconfig = JSON.parse(readFileSync(join(ctx, "tsconfig.json"), "utf8"));
+  assert.equal(tsconfig.compilerOptions.allowImportingTsExtensions, true, "the vendored @platform/* .ts imports must be allowed");
+  assert.equal(tsconfig.compilerOptions.noEmit, true);
+});
+
 test("an app that already declares the toolchain is not overridden", () => {
   const dir = app({
     "package.json": JSON.stringify({
