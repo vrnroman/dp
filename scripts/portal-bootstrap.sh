@@ -72,18 +72,20 @@ if [ "$GOOGLE_ON" = "1" ]; then
   RELAY_ALLOW="$RELAY_ALLOWDIR/allow.txt"
   mkdir -p "$RELAY_ALLOWDIR"
   touch "$RELAY_ALLOW"
-  RELAY_KID=$(sudo -u "$APPUSER" env HOME="$HOME_DIR" node "$REPO/apps/portal/relay-keygen.js" "$RELAY_KEY" "$RELAY_PUB" "$RELAY_KIDF")
+  # Generate the key as root (we are root here; /etc is root-owned), then hand ownership to the
+  # app user so the node service can read it at runtime.
+  RELAY_KID=$(/usr/bin/node "$REPO/apps/portal/relay-keygen.js" "$RELAY_KEY" "$RELAY_PUB" "$RELAY_KIDF")
   if [ ! -f "$RELAY_ADMINF" ]; then openssl rand -hex 24 > "$RELAY_ADMINF"; chmod 600 "$RELAY_ADMINF"; fi
   RELAY_ADMIN=$(cat "$RELAY_ADMINF")
-  RELAY_PUBJSON=$(cat "$RELAY_PUB")
-  # The node service (running as $APPUSER) reads the private key + allowlist at runtime.
-  chown "$APPUSER:$APPUSER" "$RELAY_KEY" "$RELAY_ALLOW" "$RELAY_KIDF"
+  # The node service (running as $APPUSER) reads the private key, public key, and allowlist at runtime.
+  chown "$APPUSER:$APPUSER" "$RELAY_KEY" "$RELAY_PUB" "$RELAY_ALLOW" "$RELAY_KIDF"
   chmod 600 "$RELAY_KEY"
-  # Append the relay config to the service env (idempotent: strip any prior relay lines first).
+  # Append the relay config to the service env (idempotent: strip any prior relay lines first). The
+  # keys are passed as FILE PATHS (a multi-line PEM and a JSON JWK do not belong inline in an env file).
   sed -i '/^PORTAL_RELAY_/d; /^DP_RELAY_/d' "$ENV_INSTALLED"
   cat >> "$ENV_INSTALLED" <<RELAYEOF
 PORTAL_RELAY_PRIVATE_KEY_FILE=$RELAY_KEY
-PORTAL_RELAY_PUBLIC_KEY=$RELAY_PUBJSON
+PORTAL_RELAY_PUBLIC_KEY_FILE=$RELAY_PUB
 PORTAL_RELAY_KID=$RELAY_KID
 PORTAL_RELAY_ISSUER=dp-relay
 PORTAL_RELAY_ADMIN_SECRET=$RELAY_ADMIN

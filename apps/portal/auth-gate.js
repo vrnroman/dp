@@ -257,7 +257,13 @@ function createGate() {
     (process.env.PORTAL_RELAY_PRIVATE_KEY_FILE && existsSync(process.env.PORTAL_RELAY_PRIVATE_KEY_FILE)
       ? readFileSync(process.env.PORTAL_RELAY_PRIVATE_KEY_FILE, "utf8")
       : "");
-  const relayPubJwk = process.env.PORTAL_RELAY_PUBLIC_KEY || ""; // single-line JSON, served as-is
+  // Public JWK, served to apps as-is. From a file on the VM (avoids env-file quoting of JSON),
+  // or inline for tests.
+  const relayPubJwk =
+    process.env.PORTAL_RELAY_PUBLIC_KEY ||
+    (process.env.PORTAL_RELAY_PUBLIC_KEY_FILE && existsSync(process.env.PORTAL_RELAY_PUBLIC_KEY_FILE)
+      ? readFileSync(process.env.PORTAL_RELAY_PUBLIC_KEY_FILE, "utf8").trim()
+      : "");
   const relayKid = process.env.PORTAL_RELAY_KID || "relay-1";
   const relayIssuer = process.env.PORTAL_RELAY_ISSUER || "dp-relay";
   const relayAdminSecret = process.env.PORTAL_RELAY_ADMIN_SECRET || "";
