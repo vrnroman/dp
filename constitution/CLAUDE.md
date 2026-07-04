@@ -101,14 +101,21 @@ await requireRole("editor");            // throws unless the person can do the "
 
 Sign-in is Google (`tier: proper`). The platform ships the whole front door: the "Continue with
 Google" screen, the sign-in, the session, and the owner's "who's in" screen. You do not build a
-login, an allowlist, or a settings page. Two route files, copied verbatim, are all the wiring:
+login, an allowlist, or a settings page. Three route files, copied verbatim, are all the wiring:
 
 ```ts
 // app/auth/google/route.ts
 export { googleStart as GET } from "@platform/auth/next";
 // app/auth/google/callback/route.ts
 export { googleCallback as GET } from "@platform/auth/next";
+// app/auth/complete/route.ts
+export { googleComplete as GET } from "@platform/auth/next";
 ```
+
+Ship all three. The platform decides at deploy time whether people sign in with Google directly
+(hands back to `/auth/google/callback`) or through the platform's shared sign-in (hands back to
+`/auth/complete`), so an app that ships both callbacks works either way. `deployctl check` refuses
+to deploy a `proper` app that is missing any of the three.
 
 **Roles: you declare them, the platform assigns them.** This is the whole division of labor.
 Your job is one thing: name the roles your app understands in `app.deploy.yaml`, each with a

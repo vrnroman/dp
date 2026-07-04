@@ -82,7 +82,7 @@ export function buildTimeEnv(manifest: Manifest, source: NodeJS.ProcessEnv = pro
   if (manifest.auth?.tier === "proper") {
     env.PLATFORM_OWNER_EMAIL = "owner@placeholder.example";
     env.PLATFORM_SIGNUP_MODE = manifest.auth?.signup === "invite" ? "invite" : "open";
-    env.PLATFORM_BASE_URL = `https://${manifest.name}.vercel.app`;
+    env.PLATFORM_APP_ORIGIN = `https://${manifest.name}.vercel.app`;
     if (manifest.auth?.roles?.length) env.PLATFORM_ROLES = JSON.stringify(manifest.auth.roles);
     if (manifest.auth?.default) env.PLATFORM_DEFAULT_ROLE = manifest.auth.default;
   }

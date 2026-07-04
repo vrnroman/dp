@@ -92,6 +92,33 @@ test("a hardcoded Google client secret is caught", () => {
   assert.ok(report.findings.some((f) => f.level === "error" && /Google sign-in client secret/i.test(f.problem)));
 });
 
+test("a hardcoded OpenSSH/encrypted private key is caught (not just RSA/EC)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "conf-pem-"));
+  writeFileSync(join(dir, "app.deploy.yaml"), "name: leaky-key\nblueprint: web\nweb:\n  framework: nextjs\n");
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { build: "next build" }, dependencies: { next: "15.0.0" } }));
+  mkdirSync(join(dir, "lib"));
+  writeFileSync(join(dir, "lib", "key.ts"), `export const K = \`-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk\n-----END OPENSSH PRIVATE KEY-----\`;\n`);
+  const report = checkApp(dir);
+  assert.equal(report.ok, false);
+  assert.ok(report.findings.some((f) => f.level === "error" && /private key/i.test(f.problem)));
+});
+
+test("a proper-tier app missing an auth route (e.g. /auth/complete) is refused", () => {
+  const dir = mkdtempSync(join(tmpdir(), "conf-routes-"));
+  writeFileSync(
+    join(dir, "app.deploy.yaml"),
+    "name: needs-routes\nblueprint: web\nweb:\n  framework: nextjs\nauth:\n  tier: proper\n  roles:\n    - name: viewer\n      can: read\n  default: viewer\n",
+  );
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { build: "next build" }, dependencies: { next: "15.0.0" } }));
+  // Ship start + direct callback, but FORGET /auth/complete (the relay hand-back).
+  mkdirSync(join(dir, "app", "auth", "google", "callback"), { recursive: true });
+  writeFileSync(join(dir, "app", "auth", "google", "route.ts"), `export { googleStart as GET } from "@platform/auth/next";\n`);
+  writeFileSync(join(dir, "app", "auth", "google", "callback", "route.ts"), `export { googleCallback as GET } from "@platform/auth/next";\n`);
+  const report = checkApp(dir);
+  assert.equal(report.ok, false);
+  assert.ok(report.findings.some((f) => f.level === "error" && /auth\/complete/.test(f.where)));
+});
+
 test("an app with no manifest is a single clear error", () => {
   const report = checkApp(join(root, "packages")); // no app.deploy.yaml here
   assert.equal(report.ok, false);

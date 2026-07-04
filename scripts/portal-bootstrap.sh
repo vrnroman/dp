@@ -60,6 +60,40 @@ if [ "$GOOGLE_ON" = "1" ]; then
   install -m 600 -o root -g root "$ENV_SHIPPED" "$ENV_INSTALLED"
   rm -f "$ENV_SHIPPED"
   log "portal Google sign-in: configured (front door will use Google, not the shared password)"
+
+  # Auth relay: stand up the shared relay so EVERY deployed app gets Google sign-in with no
+  # per-app Google-console step. The signing key + admin secret are generated ONCE and preserved
+  # (rotating the key would invalidate every deployed app's held public key).
+  RELAY_KEY=/etc/dp-relay-key.pem
+  RELAY_PUB=/etc/dp-relay-pub.json
+  RELAY_KIDF=/etc/dp-relay-kid
+  RELAY_ADMINF=/etc/dp-relay-admin.secret
+  RELAY_ALLOWDIR=/var/lib/dp-relay
+  RELAY_ALLOW="$RELAY_ALLOWDIR/allow.txt"
+  mkdir -p "$RELAY_ALLOWDIR"
+  touch "$RELAY_ALLOW"
+  RELAY_KID=$(sudo -u "$APPUSER" env HOME="$HOME_DIR" node "$REPO/apps/portal/relay-keygen.js" "$RELAY_KEY" "$RELAY_PUB" "$RELAY_KIDF")
+  if [ ! -f "$RELAY_ADMINF" ]; then openssl rand -hex 24 > "$RELAY_ADMINF"; chmod 600 "$RELAY_ADMINF"; fi
+  RELAY_ADMIN=$(cat "$RELAY_ADMINF")
+  RELAY_PUBJSON=$(cat "$RELAY_PUB")
+  # The node service (running as $APPUSER) reads the private key + allowlist at runtime.
+  chown "$APPUSER:$APPUSER" "$RELAY_KEY" "$RELAY_ALLOW" "$RELAY_KIDF"
+  chmod 600 "$RELAY_KEY"
+  # Append the relay config to the service env (idempotent: strip any prior relay lines first).
+  sed -i '/^PORTAL_RELAY_/d; /^DP_RELAY_/d' "$ENV_INSTALLED"
+  cat >> "$ENV_INSTALLED" <<RELAYEOF
+PORTAL_RELAY_PRIVATE_KEY_FILE=$RELAY_KEY
+PORTAL_RELAY_PUBLIC_KEY=$RELAY_PUBJSON
+PORTAL_RELAY_KID=$RELAY_KID
+PORTAL_RELAY_ISSUER=dp-relay
+PORTAL_RELAY_ADMIN_SECRET=$RELAY_ADMIN
+PORTAL_RELAY_ALLOW_FILE=$RELAY_ALLOW
+DP_RELAY_URL=https://$HOSTNAME_
+DP_RELAY_ADMIN_TOKEN=$RELAY_ADMIN
+DP_RELAY_ISSUER=dp-relay
+RELAYEOF
+  chmod 600 "$ENV_INSTALLED"
+  log "auth relay: provisioned (kid $RELAY_KID); deployed apps get Google sign-in with no setup"
 else
   log "portal Google sign-in: not configured (front door stays on the shared password)"
 fi

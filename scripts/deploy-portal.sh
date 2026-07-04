@@ -56,7 +56,7 @@ PORTAL_ALLOWED_EMAILS=$PALLOW
 PORTAL_OPEN=$POPEN
 EOF
   SCP_LIST+=("$ENVFILE")
-  GOOGLE_NOTE="ON (Google sign-in; register https://$HOSTNAME_/auth/google/callback in the Google console)"
+  GOOGLE_NOTE="ON (portal Google sign-in + the auth relay, so every deployed app gets Google sign-in with no per-app setup; register https://$HOSTNAME_/auth/google/callback in the Google console)"
   if [ -z "$PALLOW" ] && [ "$POPEN" != "1" ]; then
     echo "WARNING: Google sign-in is on but PORTAL_ALLOWED_EMAILS is empty. The portal is fail-closed:"
     echo "         NOBODY will be able to sign in until you set PORTAL_ALLOWED_EMAILS=you@gmail.com"

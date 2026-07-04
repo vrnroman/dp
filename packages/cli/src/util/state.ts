@@ -36,6 +36,8 @@ export interface DeployState {
   };
   authSecret?: string;
   url?: string;
+  /** relay mode: the origin registered with the auth relay, so `down` can deregister it. */
+  relay?: { origin: string; url: string };
 }
 
 function statePath(appDir: string): string {

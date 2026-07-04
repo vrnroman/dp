@@ -6,6 +6,7 @@ import {
   signValue,
   verifyValue,
   verifyGoogleIdToken,
+  verifyRelayAssertion,
   safeReturnTo,
   type Jwk,
 } from "../src/oauth.ts";
@@ -191,6 +192,61 @@ test("safeReturnTo keeps same-origin paths and refuses open redirects", () => {
   for (const v of ["/\\evil.com", "//evil.com", "/\t//evil.com"]) {
     assert.equal(new URL(safeReturnTo(v), "https://app.example").origin, "https://app.example");
   }
+});
+
+// --- relay identity assertion (app-side verification of the relay's signed token) ---
+const relay = generateKeyPairSync("rsa", { modulusLength: 2048 });
+const RELAY_KID = "relay-key-1";
+const RELAY_ISS = "dp-relay";
+const APP_ORIGIN = "https://myapp.vercel.app";
+const relayJwk = { ...(relay.publicKey.export({ format: "jwk" }) as Record<string, unknown>), kid: RELAY_KID, alg: "RS256", use: "sig" } as Jwk;
+function makeAssertion(over: Record<string, unknown> = {}, opts: { kid?: string; alg?: string; sign?: boolean; key?: typeof relay.privateKey } = {}): string {
+  const now = Math.floor(Date.now() / 1000);
+  const header = { alg: opts.alg ?? "RS256", kid: opts.kid ?? RELAY_KID, typ: "JWT" };
+  const claims = {
+    iss: RELAY_ISS, aud: APP_ORIGIN, sub: "google-sub-99", email: "user@example.com",
+    email_verified: true, name: "Real User", nonce: "app-nonce", iat: now, exp: now + 120, ...over,
+  };
+  const input = `${b64url(header)}.${b64url(claims)}`;
+  let sig = "";
+  if (opts.sign !== false) sig = cryptoSign("RSA-SHA256", Buffer.from(input), opts.key ?? relay.privateKey).toString("base64url");
+  return `${input}.${sig}`;
+}
+const relayOpts = { publicKey: relayJwk, issuer: RELAY_ISS, audience: APP_ORIGIN, nonce: "app-nonce" };
+
+test("a genuine relay assertion verifies to the identity", () => {
+  const r = verifyRelayAssertion(makeAssertion(), relayOpts);
+  assert.ok(r.ok, r.ok ? "" : r.reason);
+  if (r.ok) { assert.equal(r.identity.email, "user@example.com"); assert.equal(r.identity.sub, "google-sub-99"); }
+});
+test("a relay assertion for a different app (aud) is refused", () => {
+  assert.equal(verifyRelayAssertion(makeAssertion({ aud: "https://evil.vercel.app" }), relayOpts).ok, false);
+});
+test("a relay assertion from the wrong issuer is refused", () => {
+  assert.equal(verifyRelayAssertion(makeAssertion({ iss: "not-the-relay" }), relayOpts).ok, false);
+});
+test("an expired relay assertion is refused", () => {
+  const now = Math.floor(Date.now() / 1000);
+  assert.equal(verifyRelayAssertion(makeAssertion({ exp: now - 300, iat: now - 400 }), relayOpts).ok, false);
+});
+test("a relay assertion with a mismatched nonce is refused (replay defense)", () => {
+  assert.equal(verifyRelayAssertion(makeAssertion({ nonce: "different" }), relayOpts).ok, false);
+});
+test("a relay assertion with an unverified email is refused", () => {
+  assert.equal(verifyRelayAssertion(makeAssertion({ email_verified: false }), relayOpts).ok, false);
+});
+test("an alg:none relay assertion is refused", () => {
+  assert.equal(verifyRelayAssertion(makeAssertion({}, { alg: "none", sign: false }), relayOpts).ok, false);
+});
+test("a relay assertion signed by a DIFFERENT key (forgery) is refused", () => {
+  const attacker = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  assert.equal(verifyRelayAssertion(makeAssertion({}, { key: attacker.privateKey }), relayOpts).ok, false);
+});
+test("a tampered relay assertion payload is refused", () => {
+  const tok = makeAssertion();
+  const [h, , s] = tok.split(".");
+  const forged = `${h}.${b64url({ iss: RELAY_ISS, aud: APP_ORIGIN, sub: "x", email: "attacker@evil.example", email_verified: true, nonce: "app-nonce", exp: Math.floor(Date.now() / 1000) + 120 })}.${s}`;
+  assert.equal(verifyRelayAssertion(forged, relayOpts).ok, false);
 });
 
 test("email is normalized to lowercase", () => {

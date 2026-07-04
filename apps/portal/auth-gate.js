@@ -10,7 +10,8 @@
 // a comma-separated list to restrict it. The verification is the real thing: the id_token's RS256
 // signature is checked against Google's published keys, plus issuer / audience / expiry / nonce.
 const http = require("node:http");
-const { createHmac, createPublicKey, timingSafeEqual, verify: cryptoVerify, randomBytes, createHash } = require("node:crypto");
+const { createHmac, createPublicKey, timingSafeEqual, verify: cryptoVerify, sign: cryptoSign, randomBytes, createHash } = require("node:crypto");
+const { readFileSync, writeFileSync, appendFileSync, existsSync } = require("node:fs");
 
 const GOOGLE_AUTH = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN = "https://oauth2.googleapis.com/token";
@@ -85,7 +86,13 @@ function createGate() {
     return `${origin}/auth/google/callback`;
   }
 
-  // Verify a Google id_token end to end. Returns { email, name } or null. Fail-closed.
+  // Verify a Google id_token end to end. Returns { email, name, sub } or null. Fail-closed.
+  //
+  // PARITY REQUIREMENT: this is the zero-dependency portal's own copy of the hardened verifier in
+  // packages/auth/src/oauth.ts (`verifyRs256Jwt`). The portal ships as a standalone plain-JS
+  // service (no build step, no @platform/auth import), so the logic is duplicated on purpose. Any
+  // hardening to oauth.ts's RS256 verification (algorithm/kid/iss/aud/exp/iat/nonce checks) MUST be
+  // mirrored here, since the relay verifies internet-facing Google tokens through this path.
   function verifyIdToken(idToken, jwks, nonce) {
     if (!idToken || typeof idToken !== "string") return null;
     const parts = idToken.split(".");
@@ -113,7 +120,11 @@ function createGate() {
     const email = typeof claims.email === "string" ? claims.email.trim().toLowerCase() : "";
     const verified = claims.email_verified === true || claims.email_verified === "true";
     if (!email || !verified) return null;
-    return { email, name: typeof claims.name === "string" ? claims.name : "" };
+    return {
+      email,
+      name: typeof claims.name === "string" ? claims.name : "",
+      sub: typeof claims.sub === "string" ? claims.sub : "",
+    };
   }
 
   let jwksCache = null;
@@ -139,6 +150,17 @@ function createGate() {
     const j = await r.json();
     if (!j.id_token) throw new Error("no id_token");
     return j.id_token;
+  }
+  // The single Google code->identity path shared by BOTH the portal's own login and the relay,
+  // so their verification never drifts: exchange the code, verify the id_token, retry once with
+  // fresh JWKS in case Google rotated keys. Returns { email, name, sub } or null.
+  async function googleIdentityFromCode(code, req, verifier, nonce) {
+    try {
+      const idToken = await exchangeCode(code, redirectUri(req), verifier);
+      let id = verifyIdToken(idToken, await fetchJwks(false), nonce);
+      if (!id) id = verifyIdToken(idToken, await fetchJwks(true), nonce);
+      return id;
+    } catch { return null; }
   }
 
   /** Who is signed in, or null. */
@@ -188,13 +210,7 @@ function createGate() {
       const txn = unsign(cookies(req)[OAUTH_COOKIE]);
       clearCookie(res, OAUTH_COOKIE);
       if (!code || !state || !txn || txn.exp < Math.floor(Date.now() / 1000) || !ctEq(txn.state, state)) return fail("bad");
-      let identity;
-      try {
-        const idToken = await exchangeCode(code, redirectUri(req), txn.verifier);
-        identity = verifyIdToken(idToken, await fetchJwks(false), txn.nonce);
-        // Retry once with fresh keys in case Google rotated signing keys since we cached them.
-        if (!identity) identity = verifyIdToken(idToken, await fetchJwks(true), txn.nonce);
-      } catch { identity = null; }
+      const identity = await googleIdentityFromCode(code, req, txn.verifier, txn.nonce);
       if (!identity) return fail("verify");
       if (!isAllowed(identity.email)) return fail("not-allowed");
       setCookie(res, SESSION_COOKIE, sign({ email: identity.email, name: identity.name, exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7 }), 60 * 60 * 24 * 7);
@@ -227,7 +243,163 @@ function createGate() {
     return false; // signed in and allowed — let the caller serve the request
   }
 
-  return { enabled, handle, user };
+  /* ------------------------------------------------------------------ */
+  /* Relay: this portal acting as the shared auth relay for OTHER apps.  */
+  /* It holds the Google client + the ONE registered redirect URI + its  */
+  /* own signing key, so a deployed app signs people in through here and  */
+  /* never needs its own Google-console step. It stores NO users/sessions */
+  /* — it only relays the OAuth callback and mints a short-lived signed   */
+  /* identity assertion the app verifies with the relay's public key.     */
+  /* ------------------------------------------------------------------ */
+  // The private key is multi-line PEM, so on the VM it comes from a file path; inline is for tests.
+  const relayPrivPem =
+    process.env.PORTAL_RELAY_PRIVATE_KEY ||
+    (process.env.PORTAL_RELAY_PRIVATE_KEY_FILE && existsSync(process.env.PORTAL_RELAY_PRIVATE_KEY_FILE)
+      ? readFileSync(process.env.PORTAL_RELAY_PRIVATE_KEY_FILE, "utf8")
+      : "");
+  const relayPubJwk = process.env.PORTAL_RELAY_PUBLIC_KEY || ""; // single-line JSON, served as-is
+  const relayKid = process.env.PORTAL_RELAY_KID || "relay-1";
+  const relayIssuer = process.env.PORTAL_RELAY_ISSUER || "dp-relay";
+  const relayAdminSecret = process.env.PORTAL_RELAY_ADMIN_SECRET || "";
+  const relayAllowFile = process.env.PORTAL_RELAY_ALLOW_FILE || "";
+  // On only when the Google client, a signing key, and an allowlist file are all configured.
+  const relayEnabled = enabled && !!relayPrivPem && !!relayAllowFile;
+  const RELAY_COOKIE = "portal_relay";
+
+  // Normalize to scheme://host (no path, no trailing slash). Only https, plus http://localhost
+  // for local testing. "" on anything invalid (fail-closed).
+  function normalizeOrigin(raw) {
+    try {
+      const u = new URL(String(raw || ""));
+      const isLocal = u.hostname === "localhost" || u.hostname === "127.0.0.1";
+      if (u.protocol !== "https:" && !(u.protocol === "http:" && isLocal)) return "";
+      return u.origin;
+    } catch { return ""; }
+  }
+  // Exact-match allowlist, re-read from disk each check (a freshly-registered app works with no
+  // restart). Fail-closed: no file, unreadable, or origin absent -> not allowed.
+  function relayAllowed(origin) {
+    if (!origin || !relayAllowFile || !existsSync(relayAllowFile)) return false;
+    try {
+      return readFileSync(relayAllowFile, "utf8").split("\n").map((s) => s.trim()).filter(Boolean).includes(origin);
+    } catch { return false; }
+  }
+  function relayRegister(origin) {
+    const clean = normalizeOrigin(origin);
+    if (!clean) return false;
+    if (!relayAllowed(clean)) appendFileSync(relayAllowFile, clean + "\n");
+    return true;
+  }
+  // Remove an origin so a torn-down app can no longer get assertions (guards against a later
+  // owner of a freed subdomain minting valid identities).
+  function relayDeregister(origin) {
+    const clean = normalizeOrigin(origin);
+    if (!clean || !relayAllowFile || !existsSync(relayAllowFile)) return false;
+    try {
+      const kept = readFileSync(relayAllowFile, "utf8").split("\n").map((s) => s.trim()).filter(Boolean).filter((o) => o !== clean);
+      writeFileSync(relayAllowFile, kept.length ? kept.join("\n") + "\n" : "");
+      return true;
+    } catch { return false; }
+  }
+  function b64urlJson(o) { return Buffer.from(JSON.stringify(o)).toString("base64url"); }
+  function signAssertion(claims) {
+    const header = { alg: "RS256", kid: relayKid, typ: "JWT" };
+    const input = `${b64urlJson(header)}.${b64urlJson(claims)}`;
+    return `${input}.${cryptoSign("RSA-SHA256", Buffer.from(input), relayPrivPem).toString("base64url")}`;
+  }
+  function readJsonBody(req) {
+    return new Promise((resolve) => {
+      let b = ""; req.on("data", (d) => { b += d; if (b.length > 1e5) req.destroy(); });
+      req.on("end", () => { try { resolve(JSON.parse(b || "{}")); } catch { resolve({}); } });
+      req.on("error", () => resolve({}));
+    });
+  }
+
+  /**
+   * Public relay endpoints (NOT behind the portal's own sign-in) plus the relay branch of the
+   * shared /auth/google/callback. Returns true if it handled the request; false to fall through.
+   */
+  async function handleRelay(req, res, url) {
+    if (!relayEnabled) return false;
+    const p = url.pathname;
+    const nowS = Math.floor(Date.now() / 1000);
+
+    if (p === "/auth/relay/pubkey") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(relayPubJwk || "{}");
+      return true;
+    }
+
+    if ((p === "/auth/relay/register" || p === "/auth/relay/deregister") && req.method === "POST") {
+      const token = String(req.headers["authorization"] || "").replace(/^Bearer\s+/i, "");
+      if (!relayAdminSecret || !ctEq(token, relayAdminSecret)) { res.writeHead(401); res.end("no"); return true; }
+      const body = await readJsonBody(req);
+      const ok = p === "/auth/relay/register" ? relayRegister(body.origin) : relayDeregister(body.origin);
+      res.writeHead(ok ? 200 : 400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok, origin: normalizeOrigin(body.origin) }));
+      return true;
+    }
+
+    if (p === "/auth/relay/start") {
+      const app = normalizeOrigin(url.searchParams.get("app"));
+      const complete = url.searchParams.get("complete") || "";
+      const appState = url.searchParams.get("state") || "";
+      const appNonce = url.searchParams.get("nonce") || "";
+      // Fail-closed: relay ONLY for an exact allowlisted origin, and only back to <origin>/auth/complete.
+      if (!app || !relayAllowed(app)) { res.writeHead(403, { "content-type": "text/plain" }); res.end("This app is not registered for sign-in."); return true; }
+      if (normalizeOrigin(complete) !== app || !/^https?:\/\/[^/]+\/auth\/complete$/.test(complete)) { res.writeHead(400); res.end("bad return"); return true; }
+      const gstate = randomBytes(16).toString("base64url");
+      const gnonce = randomBytes(16).toString("base64url");
+      const verifier = randomBytes(32).toString("base64url");
+      const challenge = createHash("sha256").update(verifier).digest("base64url");
+      setCookie(res, RELAY_COOKIE, sign({ gstate, gnonce, verifier, app, complete, appState, appNonce, exp: nowS + 600 }), 600);
+      const q = new URLSearchParams({
+        client_id: clientId, redirect_uri: redirectUri(req), response_type: "code",
+        scope: "openid email profile", state: gstate, nonce: gnonce,
+        code_challenge: challenge, code_challenge_method: "S256", prompt: "select_account",
+      });
+      res.writeHead(302, { location: `${authEp}?${q}` });
+      res.end();
+      return true;
+    }
+
+    if (p === "/auth/google/callback") {
+      const txn = unsign(cookies(req)[RELAY_COOKIE]);
+      const state = url.searchParams.get("state");
+      // Claim this callback ONLY if the returned state matches THIS relay flow's gstate. A stale
+      // relay cookie (abandoned flow) must never hijack the portal's own login on the shared URL.
+      if (!txn || !txn.app || !state || !ctEq(String(txn.gstate), state)) return false;
+      clearCookie(res, RELAY_COOKIE);
+      const backToApp = (reason) => {
+        const dest = new URL(txn.complete);
+        dest.searchParams.set("error", reason);
+        dest.searchParams.set("state", txn.appState);
+        res.writeHead(302, { location: dest.toString() });
+        res.end();
+        return true;
+      };
+      if (url.searchParams.get("error")) return backToApp("cancelled");
+      const code = url.searchParams.get("code");
+      if (!code || txn.exp < nowS) return backToApp("bad");
+      const identity = await googleIdentityFromCode(code, req, txn.verifier, txn.gnonce);
+      if (!identity) return backToApp("verify");
+      const assertion = signAssertion({
+        iss: relayIssuer, aud: txn.app, sub: identity.sub || "",
+        email: identity.email, email_verified: true, name: identity.name || "",
+        nonce: txn.appNonce, iat: nowS, exp: nowS + 120, jti: randomBytes(9).toString("hex"),
+      });
+      const dest = new URL(txn.complete);
+      dest.searchParams.set("assertion", assertion);
+      dest.searchParams.set("state", txn.appState);
+      res.writeHead(302, { location: dest.toString() });
+      res.end();
+      return true;
+    }
+
+    return false;
+  }
+
+  return { enabled, handle, handleRelay, user, relayEnabled };
 }
 
 module.exports = { createGate };

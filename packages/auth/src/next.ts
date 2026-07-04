@@ -33,6 +33,7 @@ import {
   signValue,
   verifyValue,
   verifyGoogleIdToken,
+  verifyRelayAssertion,
   safeReturnTo,
   GOOGLE_AUTH_ENDPOINT,
   GOOGLE_TOKEN_ENDPOINT,
@@ -219,14 +220,115 @@ function pkce(): { verifier: string; challenge: string } {
   return { verifier, challenge };
 }
 
+/* ------------------------------------------------------------------ */
+/* Relay mode — sign in through the platform's shared auth relay        */
+/* instead of talking to Google directly, so a new app "just works"     */
+/* with no Google-console step. The relay (on the platform's VM) holds   */
+/* the Google client + the ONE registered redirect URI; the app only     */
+/* holds the relay's PUBLIC key (not secret) to verify what it returns.  */
+/* ------------------------------------------------------------------ */
+
+function relayUrl(): string {
+  return (process.env.PLATFORM_AUTH_RELAY_URL || "").replace(/\/+$/, "");
+}
+function relayPublicKey(): Jwk | null {
+  try {
+    const k = JSON.parse(process.env.PLATFORM_RELAY_PUBLIC_KEY || "");
+    return k && typeof k === "object" ? (k as Jwk) : null;
+  } catch {
+    return null;
+  }
+}
+function relayIssuer(): string {
+  return process.env.PLATFORM_RELAY_ISSUER || "dp-relay";
+}
+/** Relay mode is on only when BOTH the relay URL and its public key are injected. */
+function relayEnabled(): boolean {
+  return !!relayUrl() && !!relayPublicKey();
+}
+/** This app's canonical origin: what the relay binds the assertion's `aud` to. */
+function appOrigin(req: Request): string {
+  return (process.env.PLATFORM_APP_ORIGIN || new URL(req.url).origin).replace(/\/+$/, "");
+}
+
+/** Relay-mode start: redirect to the relay (not Google) with this app's own state + nonce. */
+async function relayStart(req: Request): Promise<Response> {
+  const url = new URL(req.url);
+  const returnTo = safeReturnTo(url.searchParams.get("returnTo"));
+  const state = randomBytes(16).toString("base64url");
+  const nonce = randomBytes(16).toString("base64url");
+  const now = Math.floor(Date.now() / 1000);
+  const origin = appOrigin(req);
+  const q = new URLSearchParams({
+    app: origin,
+    complete: `${origin}/auth/complete`,
+    state,
+    nonce,
+  });
+  const res = NextResponse.redirect(`${relayUrl()}/auth/relay/start?${q.toString()}`, 302);
+  // Only the app's own state + nonce + returnTo go in the cookie — no Google secrets here.
+  res.cookies.set(OAUTH_COOKIE, signValue({ state, nonce, returnTo, exp: now + 600 }, secret()), {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: true,
+    path: "/",
+    maxAge: 600,
+  });
+  return res;
+}
+
 /**
- * Route handler for GET /auth/google — start sign-in. Sets a short-lived, signed transaction
- * cookie (state + nonce + PKCE verifier) and redirects to Google's consent screen.
+ * Route handler for GET /auth/complete — the relay's hand-back. Verifies the relay's signed
+ * identity assertion (RS256, relay public key, aud=this app, nonce), then establishes the
+ * session with the same policy as direct Google.
+ *
+ *   // app/auth/complete/route.ts
+ *   export { googleComplete as GET } from "@platform/auth/next";
+ */
+export async function googleComplete(req: Request): Promise<Response> {
+  const url = new URL(req.url);
+  const back = (reason: string) => {
+    const r = NextResponse.redirect(new URL(`/signin?reason=${reason}`, url.origin), 302);
+    r.cookies.delete(OAUTH_COOKIE);
+    return r;
+  };
+  // The relay hands back ?error=... (cancelled / bad / verify) when it could not mint an assertion.
+  const relayError = url.searchParams.get("error");
+  if (relayError) return back(relayError === "cancelled" ? "cancelled" : "verify-failed");
+  const assertion = url.searchParams.get("assertion");
+  const state = url.searchParams.get("state");
+  if (!assertion || !state) return back("bad-callback");
+
+  const jar = await cookies();
+  const txn = verifyValue<{ state: string; nonce: string; returnTo: string; exp: number }>(
+    jar.get(OAUTH_COOKIE)?.value,
+    secret(),
+  );
+  if (!txn || txn.exp < Math.floor(Date.now() / 1000)) return back("expired");
+  if (txn.state !== state) return back("bad-state"); // CSRF on the relay round trip
+
+  const pub = relayPublicKey();
+  if (!pub) return back("verify-failed");
+  const result = verifyRelayAssertion(assertion, {
+    publicKey: pub,
+    issuer: relayIssuer(),
+    audience: appOrigin(req),
+    nonce: txn.nonce, // replay defense: the assertion must carry the nonce we started with
+  });
+  if (!result.ok) return back("verify-failed");
+
+  return establishSession(result.identity, url.origin, safeReturnTo(txn.returnTo));
+}
+
+/**
+ * Route handler for GET /auth/google — start sign-in. In relay mode it redirects to the platform
+ * relay; otherwise it sets a short-lived signed transaction cookie and redirects to Google.
  *
  *   // app/auth/google/route.ts
  *   export { googleStart as GET } from "@platform/auth/next";
  */
 export async function googleStart(req: Request): Promise<Response> {
+  if (relayEnabled()) return relayStart(req);
   const client = googleClient();
   const url = new URL(req.url);
   const returnTo = safeReturnTo(url.searchParams.get("returnTo"));
@@ -304,8 +406,17 @@ export async function googleCallback(req: Request): Promise<Response> {
     return back("verify-failed");
   }
 
-  // Enforce how strangers get in. The allowlist read is best-effort: a miss (e.g. the table does
-  // not exist in open mode) just means "not specially marked", and decideAccess is fail-closed.
+  return establishSession(identity, url.origin, safeReturnTo(txn.returnTo));
+}
+
+/**
+ * The shared tail of every sign-in path (direct Google AND the relay): enforce how strangers get
+ * in (decideAccess, fail-closed), record the person, and set the app's own session cookie. This
+ * is the single place identity becomes a session, so both paths apply the exact same policy.
+ */
+async function establishSession(identity: GoogleIdentity, origin: string, returnTo: string): Promise<Response> {
+  // The allowlist read is best-effort: a miss (e.g. the table does not exist in open mode) just
+  // means "not specially marked", and decideAccess is fail-closed.
   let allowlistRole: "owner" | "member" | null = null;
   try {
     const entry: AllowlistEntry | null = await store().find(identity.email);
@@ -319,7 +430,11 @@ export async function googleCallback(req: Request): Promise<Response> {
     signup: signupMode(),
     allowlistRole,
   });
-  if (!access.allowed) return back("not-allowed");
+  if (!access.allowed) {
+    const denied = NextResponse.redirect(new URL(`/signin?reason=not-allowed`, origin), 302);
+    denied.cookies.delete(OAUTH_COOKIE);
+    return denied;
+  }
 
   const user: User = {
     email: identity.email,
@@ -336,8 +451,7 @@ export async function googleCallback(req: Request): Promise<Response> {
     /* never fail a valid sign-in because the directory write hiccuped */
   }
 
-  // Set the session ON the redirect response, and clear the now-spent transaction cookie.
-  const res = NextResponse.redirect(new URL(safeReturnTo(txn.returnTo), url.origin), 302);
+  const res = NextResponse.redirect(new URL(returnTo, origin), 302);
   res.cookies.delete(OAUTH_COOKIE);
   res.cookies.set(COOKIE, signSession(user, secret()), {
     httpOnly: true,

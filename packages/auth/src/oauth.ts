@@ -174,15 +174,35 @@ export interface VerifyIdTokenOptions {
   clockToleranceSeconds?: number;
 }
 
+export interface VerifyJwtOptions {
+  /** the RS256 public keys to try (Google's JWKS, or the relay's single public key). */
+  keys: Jwk[];
+  /** allowed issuers; the token's `iss` must be one of these. */
+  issuers: string[];
+  /** required audience; the token's `aud` must equal (or contain) this. */
+  audience: string;
+  /** if set, the token's `nonce` must match this exactly. */
+  nonce?: string;
+  /** unix seconds; defaults to now. Injected so tests do not depend on the wall clock. */
+  nowSeconds?: number;
+  /** small tolerance for clock skew, in seconds. Default 120. */
+  clockToleranceSeconds?: number;
+}
+
+export type JwtResult =
+  | { ok: true; claims: Record<string, unknown> }
+  | { ok: false; reason: string };
+
 /**
- * Verify a Google id_token end to end: real RS256 signature against Google's published key,
- * then the standard claims (issuer, audience, expiry, nonce, verified email). Returns the
- * identity only if EVERY check passes. Fail-closed: any doubt returns { ok: false }.
+ * The one hardened RS256 JWT verifier every identity path goes through. Verifies a real RS256
+ * signature against the given public key(s), then the standard claims (issuer, audience, expiry,
+ * not-from-the-future, nonce). Fail-closed: any doubt returns { ok: false }. Both Google id_tokens
+ * and relay identity assertions use THIS — there is no second, looser verification path.
  */
-export function verifyGoogleIdToken(idToken: string, opts: VerifyIdTokenOptions): IdTokenResult {
-  if (!idToken || typeof idToken !== "string") return { ok: false, reason: "no id token" };
-  const parts = idToken.split(".");
-  if (parts.length !== 3) return { ok: false, reason: "id token is not a JWT" };
+export function verifyRs256Jwt(token: string, opts: VerifyJwtOptions): JwtResult {
+  if (!token || typeof token !== "string") return { ok: false, reason: "no token" };
+  const parts = token.split(".");
+  if (parts.length !== 3) return { ok: false, reason: "not a JWT" };
   const [headerB64, payloadB64, sigB64] = parts;
 
   let header: { alg?: string; kid?: string };
@@ -191,17 +211,16 @@ export function verifyGoogleIdToken(idToken: string, opts: VerifyIdTokenOptions)
     header = JSON.parse(unb64urlStr(headerB64));
     claims = JSON.parse(unb64urlStr(payloadB64));
   } catch {
-    return { ok: false, reason: "id token is not readable" };
+    return { ok: false, reason: "token is not readable" };
   }
 
-  // Only RS256, only Google's asymmetric keys. Refuse "alg: none" and HMAC downgrade attacks.
+  // Only RS256, only asymmetric keys. Refuse "alg: none" and HMAC-downgrade attacks.
   if (header.alg !== "RS256") return { ok: false, reason: `unexpected token algorithm ${header.alg}` };
-  if (!header.kid) return { ok: false, reason: "id token has no key id" };
+  if (!header.kid) return { ok: false, reason: "token has no key id" };
 
-  const jwk = opts.jwks.find((k) => k.kid === header.kid && (k.kty ?? "RSA") === "RSA");
-  if (!jwk) return { ok: false, reason: "id token was signed by an unknown key" };
+  const jwk = opts.keys.find((k) => k.kid === header.kid && (k.kty ?? "RSA") === "RSA");
+  if (!jwk) return { ok: false, reason: "token was signed by an unknown key" };
 
-  // Verify the signature over the exact signing input Google signed.
   let signatureValid = false;
   try {
     const key = createPublicKey({ key: jwk as never, format: "jwk" });
@@ -212,41 +231,40 @@ export function verifyGoogleIdToken(idToken: string, opts: VerifyIdTokenOptions)
       Buffer.from(sigB64, "base64url"),
     );
   } catch {
-    return { ok: false, reason: "id token signature could not be checked" };
+    return { ok: false, reason: "token signature could not be checked" };
   }
-  if (!signatureValid) return { ok: false, reason: "id token signature did not match" };
+  if (!signatureValid) return { ok: false, reason: "token signature did not match" };
 
-  // Standard claim checks. Any failure is fail-closed.
   const iss = String(claims.iss ?? "");
-  if (!GOOGLE_ISSUERS.includes(iss)) return { ok: false, reason: "id token was not issued by Google" };
+  if (!opts.issuers.includes(iss)) return { ok: false, reason: "token has an unexpected issuer" };
 
-  // aud may be a string or (rarely) an array; the client id must be present.
   const aud = claims.aud;
-  const audOk = Array.isArray(aud) ? aud.includes(opts.clientId) : aud === opts.clientId;
-  if (!audOk) return { ok: false, reason: "id token was issued for a different app" };
+  const audOk = Array.isArray(aud) ? aud.includes(opts.audience) : aud === opts.audience;
+  if (!audOk) return { ok: false, reason: "token was issued for a different audience" };
 
   const now = opts.nowSeconds ?? Math.floor(Date.now() / 1000);
   const tol = opts.clockToleranceSeconds ?? 120;
   const exp = Number(claims.exp);
-  if (!Number.isFinite(exp) || exp + tol < now) return { ok: false, reason: "id token has expired" };
+  if (!Number.isFinite(exp) || exp + tol < now) return { ok: false, reason: "token has expired" };
   const iat = Number(claims.iat);
-  if (Number.isFinite(iat) && iat - tol > now) return { ok: false, reason: "id token is from the future" };
+  if (Number.isFinite(iat) && iat - tol > now) return { ok: false, reason: "token is from the future" };
 
   if (opts.nonce !== undefined) {
     if (typeof claims.nonce !== "string" || !constantTimeEqual(claims.nonce, opts.nonce)) {
-      return { ok: false, reason: "id token nonce did not match this sign-in" };
+      return { ok: false, reason: "token nonce did not match" };
     }
   }
+  return { ok: true, claims };
+}
 
+/** Pull a verified identity out of already-verified claims. Requires a verified email. */
+function identityFromClaims(claims: Record<string, unknown>): IdTokenResult {
   const email = typeof claims.email === "string" ? claims.email.trim().toLowerCase() : "";
-  if (!email) return { ok: false, reason: "id token carries no email" };
-  // Google sends email_verified as a boolean or the string "true".
+  if (!email) return { ok: false, reason: "token carries no email" };
   const emailVerified = claims.email_verified === true || claims.email_verified === "true";
-  if (!emailVerified) return { ok: false, reason: "this Google account's email is not verified" };
-
+  if (!emailVerified) return { ok: false, reason: "this account's email is not verified" };
   const sub = typeof claims.sub === "string" ? claims.sub : "";
-  if (!sub) return { ok: false, reason: "id token carries no account id" };
-
+  if (!sub) return { ok: false, reason: "token carries no account id" };
   return {
     ok: true,
     identity: {
@@ -257,4 +275,53 @@ export function verifyGoogleIdToken(idToken: string, opts: VerifyIdTokenOptions)
       picture: typeof claims.picture === "string" ? claims.picture : undefined,
     },
   };
+}
+
+/**
+ * Verify a Google id_token end to end and return the identity. Thin wrapper over the shared
+ * verifier with Google's issuers + the app's client id as the audience.
+ */
+export function verifyGoogleIdToken(idToken: string, opts: VerifyIdTokenOptions): IdTokenResult {
+  const res = verifyRs256Jwt(idToken, {
+    keys: opts.jwks,
+    issuers: GOOGLE_ISSUERS,
+    audience: opts.clientId,
+    nonce: opts.nonce,
+    nowSeconds: opts.nowSeconds,
+    clockToleranceSeconds: opts.clockToleranceSeconds,
+  });
+  if (!res.ok) return { ok: false, reason: res.reason };
+  return identityFromClaims(res.claims);
+}
+
+export interface VerifyRelayAssertionOptions {
+  /** the relay's public key (JWK), injected into the app at deploy time (not secret). */
+  publicKey: Jwk;
+  /** the relay's issuer id; the assertion's `iss` must equal this. */
+  issuer: string;
+  /** this app's origin; the assertion's `aud` must equal this (binds it to this app). */
+  audience: string;
+  /** the nonce this app started sign-in with; the assertion's `nonce` must match. */
+  nonce?: string;
+  nowSeconds?: number;
+  /** relay assertions are short-lived; keep the skew tolerance tight. Default 60. */
+  clockToleranceSeconds?: number;
+}
+
+/**
+ * Verify a relay identity assertion: the same hardened RS256 path, but the key is the relay's
+ * public key and the issuer/audience are the relay and this app. The app still requires a
+ * verified email (it never trusts the relay blindly). Fail-closed.
+ */
+export function verifyRelayAssertion(token: string, opts: VerifyRelayAssertionOptions): IdTokenResult {
+  const res = verifyRs256Jwt(token, {
+    keys: [opts.publicKey],
+    issuers: [opts.issuer],
+    audience: opts.audience,
+    nonce: opts.nonce,
+    nowSeconds: opts.nowSeconds,
+    clockToleranceSeconds: opts.clockToleranceSeconds ?? 60,
+  });
+  if (!res.ok) return { ok: false, reason: res.reason };
+  return identityFromClaims(res.claims);
 }

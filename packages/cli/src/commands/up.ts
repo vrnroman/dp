@@ -272,28 +272,51 @@ export async function runUp(appDirArg: string, opts: UpOptions): Promise<number>
     }
     if (dbUrl) envVars.DATABASE_URL = dbUrl;
 
-    // Google sign-in (proper tier): the platform tells the app who its owner is, how strangers
-    // get in, the roles the app declared, and the URL to register with Google. The Google client
-    // id/secret come from the owner's environment (like the Vercel/Supabase tokens), and are
-    // omitted when absent — the app still deploys; sign-in turns on once they are supplied.
+    // Google sign-in (proper tier). Two ways it can be wired, in priority order:
+    //  1. RELAY (zero setup): if a platform auth relay is configured (DP_RELAY_URL + admin token),
+    //     the deploy registers this app's origin with the relay and injects the relay URL + its
+    //     PUBLIC key. The app signs people in THROUGH the relay, so no Google-console step is ever
+    //     needed per app, and the Google client SECRET never touches this app's env.
+    //  2. DIRECT: otherwise the app talks to Google itself with an injected client id/secret (which
+    //     needs the app's callback registered in the Google console once).
     let googleMissing = false;
+    let relayActive = false;
     if (manifest.auth?.tier === "proper") {
       envVars.PLATFORM_OWNER_EMAIL = identityOwnerEmail;
       envVars.PLATFORM_SIGNUP_MODE = manifest.auth?.signup === "invite" ? "invite" : "open";
-      // Do NOT hardcode the callback origin from a guessed slug (Vercel can assign a different
-      // production domain). Only pin PLATFORM_BASE_URL when the owner names a custom domain; when
-      // unset, the binding derives the redirect_uri from the actual request host, which always
-      // matches the address the person is on (and the one the owner registers with Google).
-      if (process.env.GOOGLE_BASE_URL) {
-        envVars.PLATFORM_BASE_URL = process.env.GOOGLE_BASE_URL.replace(/\/+$/, "");
-      }
       if (manifest.auth?.roles?.length) envVars.PLATFORM_ROLES = JSON.stringify(manifest.auth.roles);
       if (manifest.auth?.default) envVars.PLATFORM_DEFAULT_ROLE = manifest.auth.default;
-      if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
-        envVars.GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
-        envVars.GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
-      } else {
-        googleMissing = true;
+
+      const appUrl = (process.env.GOOGLE_BASE_URL || `https://${slug}.vercel.app`).replace(/\/+$/, "");
+      const relayBase = (process.env.DP_RELAY_URL || "").replace(/\/+$/, "");
+      const relayAdmin = process.env.DP_RELAY_ADMIN_TOKEN || "";
+      if (relayBase && relayAdmin) {
+        const pub = await relaySetup(relayBase, relayAdmin, appUrl);
+        if (pub) {
+          envVars.PLATFORM_AUTH_RELAY_URL = relayBase;
+          envVars.PLATFORM_RELAY_PUBLIC_KEY = pub;
+          envVars.PLATFORM_RELAY_ISSUER = process.env.DP_RELAY_ISSUER || "dp-relay";
+          // Do NOT pin PLATFORM_APP_ORIGIN to the guessed slug: the app derives its origin from the
+          // actual request host at runtime, so the relay hand-back lands on the SAME host the cookie
+          // was set on (works even if Vercel assigned a different production domain). We still
+          // register the best deploy-time guess (or GOOGLE_BASE_URL); a mismatch fails loud at the
+          // relay (not-registered) rather than silently on a missing cookie.
+          relayActive = true;
+          // Remember what we registered so `down` can deregister it (a freed origin must not keep
+          // getting valid identity assertions if someone else later claims that subdomain).
+          state.relay = { origin: appUrl, url: relayBase };
+          writeState(appDir, state);
+        }
+      }
+      if (!relayActive) {
+        // Direct-Google fallback. Pin the callback origin only when the owner named a custom domain.
+        if (process.env.GOOGLE_BASE_URL) envVars.PLATFORM_BASE_URL = process.env.GOOGLE_BASE_URL.replace(/\/+$/, "");
+        if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
+          envVars.GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+          envVars.GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+        } else {
+          googleMissing = true;
+        }
       }
     }
 
@@ -301,7 +324,12 @@ export async function runUp(appDirArg: string, opts: UpOptions): Promise<number>
     for (const k of manifest.env?.optional ?? []) if (process.env[k]) envVars[k] = process.env[k] as string;
     await vercel.setEnv(tokens.vercelToken, proj.id, envVars);
     n.done("Web home ready");
-    if (manifest.auth?.tier === "proper") {
+    if (manifest.auth?.tier === "proper" && relayActive) {
+      process.stdout.write(
+        `\n  Sign-in is on. People sign in with Google automatically through the platform, with no\n` +
+          `  setup on your side. You are the owner as ${identityOwnerEmail}.\n\n`,
+      );
+    } else if (manifest.auth?.tier === "proper") {
       const callback = `${(process.env.GOOGLE_BASE_URL || `https://${slug}.vercel.app`).replace(/\/+$/, "")}/auth/google/callback`;
       if (googleMissing) {
         process.stdout.write(
@@ -556,6 +584,31 @@ function titleCase(slug: string): string {
     .filter(Boolean)
     .map((w) => w[0].toUpperCase() + w.slice(1))
     .join(" ");
+}
+
+/**
+ * Register an app's origin with the platform auth relay and fetch the relay's public key, so the
+ * app can sign people in through the relay with no per-app Google setup. Best-effort: returns the
+ * relay's public-key JWK (as a JSON string) on success, or null to fall back to direct-Google.
+ */
+async function relaySetup(relayBase: string, adminToken: string, appOrigin: string): Promise<string | null> {
+  try {
+    const reg = await fetch(`${relayBase}/auth/relay/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+      body: JSON.stringify({ origin: appOrigin }),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!reg.ok) return null;
+    const pk = await fetch(`${relayBase}/auth/relay/pubkey`, { signal: AbortSignal.timeout(8000) });
+    if (!pk.ok) return null;
+    const text = (await pk.text()).trim();
+    const parsed = JSON.parse(text) as { kid?: string };
+    if (!parsed || typeof parsed !== "object" || !parsed.kid) return null;
+    return text;
+  } catch {
+    return null;
+  }
 }
 
 /**

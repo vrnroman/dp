@@ -57,6 +57,10 @@ const SECRET_PATTERNS: Array<{ re: RegExp; name: string }> = [
   { re: /SUPABASE_SERVICE_ROLE_KEY\s*[:=]\s*['"`]eyJ/, name: "a hardcoded service role key" },
   // Google OAuth client secret. Catches a hardcoded secret; reading it from process.env passes.
   { re: /GOCSPX-[A-Za-z0-9_-]{10,}/, name: "a hardcoded Google sign-in client secret" },
+  // A private key in any common PEM form (PKCS#8, PKCS#1/RSA, EC, DSA, OpenSSH, ENCRYPTED, PGP).
+  // A private key belongs only on the platform's VM, never inside an app that ships; apps receive
+  // only the relay's PUBLIC key.
+  { re: /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----/, name: "a hardcoded private key" },
 ];
 
 // Where the app checks a role in code. The platform's SDK exposes exactly these two calls, so a
@@ -267,6 +271,34 @@ export function checkApp(appDir: string): CheckReport {
     }
     if (declared.size > 0 && usedInCode.size > 0 && ![...usedInCode.keys()].some((r) => !declared.has(r))) {
       passed.push(`Every role the code checks is declared (${declared.size} role${declared.size === 1 ? "" : "s"}).`);
+    }
+  }
+
+  // 8. A Google-sign-in (proper-tier) app must ship the auth route handlers the platform hands
+  //    control back to. Since the deploy can wire either direct-Google (returns to
+  //    /auth/google/callback) or the relay (returns to /auth/complete) and the app does not know
+  //    which at build time, it must ship BOTH callbacks plus the start route, or sign-in dead-ends
+  //    at a blank 404 with no explanation.
+  if (manifest.blueprint === "web" && manifest.auth?.tier === "proper") {
+    const exts = ["route.ts", "route.tsx", "route.js", "route.jsx"];
+    const routes: Array<[string, string]> = [
+      ["app/auth/google", "start sign-in"],
+      ["app/auth/google/callback", "finish direct Google sign-in"],
+      ["app/auth/complete", "finish sign-in through the platform relay"],
+    ];
+    const hasRoute = (dir: string) => exts.some((f) => existsSync(join(appDir, dir, f)));
+    for (const [dir, purpose] of routes) {
+      if (!hasRoute(dir)) {
+        findings.push({
+          level: "error",
+          where: `${dir}/route.ts`,
+          problem: `This app uses Google sign-in (auth.tier: proper) but is missing ${dir}/route.ts (${purpose}). Sign-in would dead-end at a blank 404.`,
+          fix: `Add ${dir}/route.ts — it is a one-line re-export from @platform/auth/next (see the builder guide). Ship all three so sign-in works however the platform wires it.`,
+        });
+      }
+    }
+    if (routes.every(([dir]) => hasRoute(dir))) {
+      passed.push("The Google sign-in route handlers are all present.");
     }
   }
 

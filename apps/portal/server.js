@@ -614,6 +614,15 @@ const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, "http://x");
   // The health probe is always open (no auth), so systemd/Caddy can check liveness.
   if (u.pathname === "/healthz") { res.writeHead(200, { "content-type": "application/json" }); return res.end(JSON.stringify({ ok: true })); }
+  // The auth RELAY endpoints (/auth/relay/*, and the relay branch of the shared Google callback)
+  // are PUBLIC — they serve OTHER deployed apps' users, not portal users — so they run before the
+  // portal's own sign-in gate. No-op unless the relay is configured.
+  try {
+    if (await gate.handleRelay(req, res, u)) return;
+  } catch (e) {
+    res.writeHead(500, { "content-type": "text/plain" });
+    return res.end("relay error");
+  }
   // The front door. When Google sign-in is configured, this handles /auth/google*, /signin, and
   // redirects anyone not signed in; it returns true when it fully handled the request. When it is
   // not configured it is a no-op (Caddy basic_auth is the gate) and returns false.

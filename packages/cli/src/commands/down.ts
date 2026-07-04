@@ -33,6 +33,27 @@ export async function runDown(appDirArg: string, opts: DownOptions): Promise<num
   const n = new Narrator();
   let allGone = true;
 
+  // Deregister from the auth relay first, so a freed origin can no longer obtain sign-in
+  // assertions. Best-effort: a relay we cannot reach never blocks the teardown.
+  if (state.relay) {
+    const relayBase = (process.env.DP_RELAY_URL || state.relay.url || "").replace(/\/+$/, "");
+    const adminToken = process.env.DP_RELAY_ADMIN_TOKEN || "";
+    if (relayBase && adminToken) {
+      try {
+        await fetch(`${relayBase}/auth/relay/deregister`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+          body: JSON.stringify({ origin: state.relay.origin }),
+          signal: AbortSignal.timeout(8000),
+        });
+      } catch {
+        /* best-effort; the app is being removed anyway */
+      }
+    }
+    delete state.relay;
+    writeState(appDir, state);
+  }
+
   if (state.gcpVm) {
     n.start("Taking the app off your machine");
     try {
