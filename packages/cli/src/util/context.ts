@@ -8,7 +8,7 @@
  * plain, standalone app any host can install and build. The user's real app directory is
  * never touched.
  */
-import { mkdtempSync, cpSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { mkdtempSync, cpSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -53,6 +53,13 @@ export function prepareDeployContext(appDir: string): DeployContext {
   const pkgPath = join(tmp, "package.json");
   const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
   const deps: Record<string, string> = pkg.dependencies ?? {};
+
+  // Detect TypeScript BEFORE vendoring (so the vendored @platform/* source doesn't count). A
+  // Next.js app written in TypeScript needs the TS toolchain or the host build dies with
+  // "you're trying to use TypeScript but do not have the required packages". That toolchain is
+  // not a technology decision the user should have to make, so the platform provides it here (on
+  // the deploy copy, never the user's app) when the app uses TS but did not declare it.
+  const usesTypescript = existsSync(join(tmp, "tsconfig.json")) || hasTsSource(tmp);
   const vendorDir = join(tmp, "vendor");
   let vendored = false;
   for (const name of Object.keys(deps)) {
@@ -72,10 +79,67 @@ export function prepareDeployContext(appDir: string): DeployContext {
     deps[name] = `file:./vendor/${short}`;
   }
   pkg.dependencies = deps;
+
+  // Provide the TS toolchain for a TypeScript app that did not declare it. Match @types/react to
+  // the app's own React major so the types never conflict with the app's version.
+  if (usesTypescript) {
+    const dev: Record<string, string> = pkg.devDependencies ?? {};
+    const all = { ...deps, ...dev };
+    const reactMajor = majorOf(all.react) ?? majorOf(all["react-dom"]) ?? 18;
+    const ensure = (name: string, version: string) => {
+      if (!all[name]) dev[name] = version;
+    };
+    ensure("typescript", "^5");
+    ensure("@types/node", "^20");
+    ensure("@types/react", `^${reactMajor}`);
+    ensure("@types/react-dom", `^${reactMajor}`);
+    pkg.devDependencies = dev;
+  }
+
   writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
 
   // A minimal ignore so the host does not try to ship local build output.
   writeFileSync(join(tmp, ".vercelignore"), ["node_modules", ".next", ".git", ".deploy-state.json"].join("\n") + "\n");
 
   return { dir: tmp };
+}
+
+/** The leading major version from a semver range like "^19.0.0" / "19" / "~18.2". Null if none. */
+function majorOf(range: string | undefined): number | null {
+  if (!range) return null;
+  const m = range.match(/(\d+)/);
+  return m ? Number(m[1]) : null;
+}
+
+/** True if the tree contains any .ts/.tsx source (skipping deps and build output). Shallow-ish
+ *  recursive walk, capped so it stays fast on a large app. */
+function hasTsSource(dir: string): boolean {
+  const SKIP_SCAN = new Set(["node_modules", ".next", ".git", ".vercel", "vendor", "dist", ".turbo"]);
+  const stack = [dir];
+  let budget = 4000; // plenty for any real app; a hard stop against pathological trees
+  while (stack.length && budget-- > 0) {
+    const cur = stack.pop() as string;
+    let entries: string[];
+    try {
+      entries = readdirSync(cur);
+    } catch {
+      continue;
+    }
+    for (const name of entries) {
+      if (SKIP_SCAN.has(name)) continue;
+      const full = join(cur, name);
+      let st;
+      try {
+        st = statSync(full);
+      } catch {
+        continue;
+      }
+      if (st.isDirectory()) {
+        stack.push(full);
+      } else if ((name.endsWith(".ts") || name.endsWith(".tsx")) && !name.endsWith(".d.ts")) {
+        return true;
+      }
+    }
+  }
+  return false;
 }

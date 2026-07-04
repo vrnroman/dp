@@ -1,0 +1,4 @@
+name: ts-no-types
+blueprint: web
+web:
+  framework: nextjs
