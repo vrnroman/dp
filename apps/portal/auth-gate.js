@@ -27,7 +27,10 @@ function ctEq(a, b) {
   return ab.length === bb.length && timingSafeEqual(ab, bb);
 }
 
-function createGate() {
+function createGate(opts) {
+  // The DP central store (groups/people/apps/mappings), injected by server.js. Optional: when
+  // absent (e.g. an old test harness), the relay still works, it just carries no roles.
+  const store = (opts && opts.store) || null;
   const clientId = process.env.PORTAL_GOOGLE_CLIENT_ID || "";
   const clientSecret = process.env.PORTAL_GOOGLE_CLIENT_SECRET || "";
   const enabled = !!(clientId && clientSecret);
@@ -340,7 +343,24 @@ function createGate() {
       const token = String(req.headers["authorization"] || "").replace(/^Bearer\s+/i, "");
       if (!relayAdminSecret || !ctEq(token, relayAdminSecret)) { res.writeHead(401); res.end("no"); return true; }
       const body = await readJsonBody(req);
-      const ok = p === "/auth/relay/register" ? relayRegister(body.origin) : relayDeregister(body.origin);
+      let ok;
+      if (p === "/auth/relay/register") {
+        ok = relayRegister(body.origin);
+        // Also record the app in the central store so the owner's groups screen knows what roles
+        // this app offers and can map groups to them. Additive to the flat allowlist above, which
+        // stays the security-critical relay gate.
+        if (ok && store) {
+          try {
+            store.registerApp(body.origin, {
+              declaredRoles: body.declaredRoles,
+              defaultRole: body.defaultRole,
+              ownerEmail: body.ownerEmail,
+            });
+          } catch { /* registry is best-effort; never fail the deploy's relay registration */ }
+        }
+      } else {
+        ok = relayDeregister(body.origin);
+      }
       res.writeHead(ok ? 200 : 400, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok, origin: normalizeOrigin(body.origin) }));
       return true;
@@ -389,10 +409,21 @@ function createGate() {
       if (!code || txn.exp < nowS) return backToApp("bad");
       const identity = await googleIdentityFromCode(code, req, txn.verifier, txn.gnonce);
       if (!identity) return backToApp("verify");
+      // Central roles: resolve what this person can do in THIS app from the DP groups store, and
+      // embed them in the signed assertion. The app reads roles from the token it already verifies,
+      // so it needs no groups database of its own. Fail-closed: no store, or an app that never
+      // registered its roles, yields none (the person still signs in, with only the app's default).
+      let roles = [];
+      if (store) {
+        try {
+          store.recordPerson({ email: identity.email, name: identity.name, sub: identity.sub });
+          roles = store.resolve(identity.email, txn.app);
+        } catch { roles = []; }
+      }
       const assertion = signAssertion({
         iss: relayIssuer, aud: txn.app, sub: identity.sub || "",
         email: identity.email, email_verified: true, name: identity.name || "",
-        nonce: txn.appNonce, iat: nowS, exp: nowS + 120, jti: randomBytes(9).toString("hex"),
+        roles, nonce: txn.appNonce, iat: nowS, exp: nowS + 120, jti: randomBytes(9).toString("hex"),
       });
       const dest = new URL(txn.complete);
       dest.searchParams.set("assertion", assertion);

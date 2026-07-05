@@ -75,19 +75,47 @@ questions.
   fail-safe fallback when unconfigured. Verified: 96 unit tests (incl. downgrade/alg-confusion/tamper/
   wrong-aud/expired/replay attacks all refused), a full mock-OAuth sign-in through the portal gate, the
   groups SQL (schema, joins, cascade, fail-closed resolution) against a real Postgres (PGlite), and a
-  clean host-style build of the reference app. NOT YET ACTIVATED live: registering a Google OAuth
-  client (owner's Google account) and flipping the live portal from basic_auth to Google — the two
-  owner actions below.
+  clean host-style build of the reference app. **ACTIVATED LIVE (verified 2026-07-05).** A Google
+  OAuth client ("Deployment Platform") already exists in the owner's `roman-vm` GCP project with both
+  callbacks registered (`https://portal.34-11-212-4.sslip.io/auth/google/callback` + a `localhost:3000`
+  dev URL), and the live portal now serves a "Continue with Google" front door instead of basic_auth.
+  Proven end to end by signing in as the owner (`vrnroman@gmail.com`) through the real Google OAuth flow
+  (PKCE + state + nonce, code→token exchange, id_token verification, allowed-email gate) into the
+  authenticated deploy UI. **Operational note:** the client secret lives only on the VM — Google no
+  longer lets you re-view an existing secret — so a `deploy-portal.sh` run WITHOUT the Google env set
+  would silently drop the portal back to basic_auth. Always pass the Google env when redeploying (and
+  if the secret is ever lost, mint a fresh one in the console and redeploy with it).
+
+- **DP-owner central Groups & access screen (built + verified 2026-07-05).** The portal owner now has
+  a real UI (`/groups`, behind the portal's own owner Google login) to **create groups, add people by
+  email, and map each group to a deployed app's declared roles** — the owner declares nothing in code.
+  Groups live centrally in DP on the VM (a zero-dependency JSON store with atomic writes + backup
+  rotation, `apps/portal/store.js`), NOT in each app's database. Apps register their declared roles at
+  deploy (`up.ts` → `/auth/relay/register`), and at sign-in the **relay resolves the person's roles for
+  that specific app and embeds them in the signed assertion** (`apps/portal/auth-gate.js`), so the app
+  reads roles from the token it already verifies (`packages/auth/src/{oauth,core,next}.ts`) with no
+  groups database of its own. Fail-closed throughout: a role an app never declared grants nothing; a
+  tampered `roles` claim breaks the RS256 signature; a tampered session breaks the HMAC. The screen
+  speaks plain English (the app's own "can" sentence, never the word "role"), and a live **"Try it as"**
+  tester shows exactly what any email can do in any app right now. Proven end to end: 142 tests
+  (incl. assertion-carries-roles + fail-closed + tamper), an adversarial verifier pass, and a live
+  browser walk-through (create group → add member → map role → see the effect). `apps/portal/groups-admin.js`.
+  **Still per-app-scoped for v1** (groups are defined centrally but mapped per app); cross-app group
+  reuse and the app-side simplification (dropping the old per-app `/settings` + `pg-groups`, gating
+  Supabase on a declared `database`) are the deferred follow-ons below. The old per-app model is
+  untouched and still works.
 
 ## Next (deferred, rough priority)
 
-1. **Activate Google sign-in live (owner actions).** The mechanism is built and verified; what remains
-   needs the owner's own credentials. (a) Register a Google OAuth client (client id/secret) in the
-   owner's Google Cloud, add the app/portal callback URLs as authorized redirects. (b) Set
-   `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` for app deploys, and `PORTAL_GOOGLE_CLIENT_ID`/`_SECRET`
-   to flip the live portal (`bash scripts/deploy-portal.sh` with those set drops basic_auth for Google).
-   Then: **groups next step** — the portal owner creating groups and adding people is built at the
-   library level; a portal-owner-facing groups screen (beyond the per-app one) is the follow-on.
+1. **Finish the central-groups rollout (the owner screen itself is now BUILT — see Done).** With DP
+   resolving roles centrally, complete the app-side simplification the central store makes possible:
+   (a) drop each app's per-app `/settings` groups screen + `pg-groups` usage in relay mode, so a
+   `proper`-tier app with no data of its own declares **no `database`** and provisions **no Supabase**
+   (gate Supabase on the app actually declaring `database`/`storage` in `up.ts`); (b) **cross-app group
+   reuse** (define "Family" once, map it in several apps) and, later, multi-tenant scoping of the store;
+   (c) update `constitution/CLAUDE.md` + the conformance route check to the slimmer app contract. Also:
+   exclude the relay host in `packages/compliance/src/extract.ts` so relay-mode deploys don't trip the
+   external-system flag. (Per-app Google sign-in for deployed apps is built but not yet verified live.)
 2. **Harden the compliance gate into the real org policy.** Activation is done (see Done): the gate
    is fail-closed in `deployctl up` and the portal shows concrete dependencies for approve/decline.
    What remains is org-strength policy: (c) a real, org-authored policy instead of the seed default

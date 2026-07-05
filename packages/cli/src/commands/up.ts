@@ -291,7 +291,11 @@ export async function runUp(appDirArg: string, opts: UpOptions): Promise<number>
       const relayBase = (process.env.DP_RELAY_URL || "").replace(/\/+$/, "");
       const relayAdmin = process.env.DP_RELAY_ADMIN_TOKEN || "";
       if (relayBase && relayAdmin) {
-        const pub = await relaySetup(relayBase, relayAdmin, appUrl);
+        const pub = await relaySetup(relayBase, relayAdmin, appUrl, {
+          declaredRoles: manifest.auth?.roles ?? [],
+          defaultRole: manifest.auth?.default ?? null,
+          ownerEmail: identityOwnerEmail,
+        });
         if (pub) {
           envVars.PLATFORM_AUTH_RELAY_URL = relayBase;
           envVars.PLATFORM_RELAY_PUBLIC_KEY = pub;
@@ -376,7 +380,12 @@ export async function runUp(appDirArg: string, opts: UpOptions): Promise<number>
           await fetch(`${relayBase}/auth/relay/register`, {
             method: "POST",
             headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
-            body: JSON.stringify({ origin: realOrigin }),
+            body: JSON.stringify({
+              origin: realOrigin,
+              declaredRoles: manifest.auth?.roles ?? [],
+              defaultRole: manifest.auth?.default ?? null,
+              ownerEmail: identityOwnerEmail,
+            }),
             signal: AbortSignal.timeout(8000),
           });
           state.relay = { origin: realOrigin, url: relayBase };
@@ -615,12 +624,19 @@ function titleCase(slug: string): string {
  * app can sign people in through the relay with no per-app Google setup. Best-effort: returns the
  * relay's public-key JWK (as a JSON string) on success, or null to fall back to direct-Google.
  */
-async function relaySetup(relayBase: string, adminToken: string, appOrigin: string): Promise<string | null> {
+async function relaySetup(
+  relayBase: string,
+  adminToken: string,
+  appOrigin: string,
+  appInfo?: { declaredRoles?: unknown; defaultRole?: string | null; ownerEmail?: string },
+): Promise<string | null> {
   try {
     const reg = await fetch(`${relayBase}/auth/relay/register`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
-      body: JSON.stringify({ origin: appOrigin }),
+      // The app's declared roles / default / owner ride along so the relay's central store knows
+      // what this app offers and the owner's groups screen can map groups to its roles.
+      body: JSON.stringify({ origin: appOrigin, ...(appInfo || {}) }),
       signal: AbortSignal.timeout(8000),
     });
     if (!reg.ok) return null;

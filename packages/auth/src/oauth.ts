@@ -313,7 +313,11 @@ export interface VerifyRelayAssertionOptions {
  * public key and the issuer/audience are the relay and this app. The app still requires a
  * verified email (it never trusts the relay blindly). Fail-closed.
  */
-export function verifyRelayAssertion(token: string, opts: VerifyRelayAssertionOptions): IdTokenResult {
+export type RelayAssertionResult =
+  | { ok: true; identity: GoogleIdentity; roles: string[] }
+  | { ok: false; reason: string };
+
+export function verifyRelayAssertion(token: string, opts: VerifyRelayAssertionOptions): RelayAssertionResult {
   const res = verifyRs256Jwt(token, {
     keys: [opts.publicKey],
     issuers: [opts.issuer],
@@ -323,5 +327,12 @@ export function verifyRelayAssertion(token: string, opts: VerifyRelayAssertionOp
     clockToleranceSeconds: opts.clockToleranceSeconds ?? 60,
   });
   if (!res.ok) return { ok: false, reason: res.reason };
-  return identityFromClaims(res.claims);
+  const id = identityFromClaims(res.claims);
+  if (!id.ok) return id;
+  // Roles the relay resolved for this (person, app) from the central DP groups store, embedded in
+  // the assertion the app already verifies end to end. Only trusted because the whole token's RS256
+  // signature checked out above; a tampered `roles` breaks that signature. Fail-closed to [].
+  const raw = (res.claims as Record<string, unknown>).roles;
+  const roles = Array.isArray(raw) ? raw.filter((r): r is string => typeof r === "string") : [];
+  return { ok: true, identity: id.identity, roles };
 }

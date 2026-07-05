@@ -25,6 +25,9 @@ export interface User {
   /** Google's stable account id. */
   sub?: string;
   picture?: string;
+  /** app roles baked in at sign-in in RELAY mode (resolved centrally by DP and carried in the
+   *  relay assertion). Absent in direct-Google mode, where roles resolve live from the groups DB. */
+  roles?: string[];
 }
 
 export interface SessionPayload {
@@ -33,6 +36,8 @@ export interface SessionPayload {
   name?: string;
   sub?: string;
   picture?: string;
+  /** relay-mode app roles, resolved centrally and carried from the assertion. */
+  roles?: string[];
   /** unix seconds */
   exp: number;
 }
@@ -59,6 +64,7 @@ export function signSession(
   if (user.name) payload.name = user.name;
   if (user.sub) payload.sub = user.sub;
   if (user.picture) payload.picture = user.picture;
+  if (user.roles && user.roles.length) payload.roles = user.roles;
   const body = b64url(JSON.stringify(payload));
   const sig = createHmac("sha256", secret).update(body).digest("base64url");
   return `${body}.${sig}`;
@@ -90,6 +96,7 @@ export function verifySession(
   if (typeof payload.name === "string") user.name = payload.name;
   if (typeof payload.sub === "string") user.sub = payload.sub;
   if (typeof payload.picture === "string") user.picture = payload.picture;
+  if (Array.isArray(payload.roles)) user.roles = payload.roles.filter((r): r is string => typeof r === "string");
   return user;
 }
 

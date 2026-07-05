@@ -20,11 +20,19 @@ const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const { randomBytes } = require("node:crypto");
 const { createGate } = require("./auth-gate.js");
+const { createStore } = require("./store.js");
+const { createGroupsAdmin } = require("./groups-admin.js");
+
+// The DP central store on the VM: groups, people, the app registry, and group->role mappings. A
+// single zero-dependency JSON file, provisioned by portal-bootstrap.sh; overridable for tests and
+// local runs via DP_STORE_FILE.
+const store = createStore(process.env.DP_STORE_FILE || "/var/lib/dp-relay/store.json");
 
 // The portal's own front door. Google sign-in when configured (PORTAL_GOOGLE_CLIENT_ID +
 // PORTAL_GOOGLE_CLIENT_SECRET); otherwise a no-op, so the existing Caddy basic_auth gate keeps
-// working unchanged. Open signup by default; PORTAL_ALLOWED_EMAILS restricts it.
-const gate = createGate();
+// working unchanged. Open signup by default; PORTAL_ALLOWED_EMAILS restricts it. The store lets the
+// relay resolve and embed each person's roles in the signed assertion at sign-in.
+const gate = createGate({ store });
 
 const PORT = Number(process.env.PORT) || 8090;
 const HOST = process.env.HOST || "127.0.0.1";
@@ -35,6 +43,9 @@ const CLI = join(REPO_ROOT, "packages", "cli", "src", "index.ts");
 // The page is behind the auth gate, so a cross-site attacker can't read the token and can't
 // forge a deploy with the owner's ambient credentials (CSRF defense).
 const CSRF = randomBytes(16).toString("hex");
+// The owner's "Groups & access" screen (/groups) and its endpoints. It reuses the portal CSRF
+// token and is only ever reached after the gate confirms a signed-in, allowed owner (see below).
+const groupsAdmin = createGroupsAdmin({ store, csrf: CSRF });
 // One deploy at a time (bounds load and keeps the streamed output legible).
 let busy = false;
 // In-flight deploys, so the POST that starts a deploy and the SSE GET that watches it are
@@ -115,7 +126,7 @@ function shell(body) {
 function homePage() {
   return shell(`
     <h1>Put it online</h1>
-    <p class="tag">Paste a project, give it a name, and it goes live on your own accounts.</p>
+    <p class="tag">Paste a project, give it a name, and it goes live on your own accounts. <a href="/groups" style="color:#9a7b32; white-space:nowrap">Groups &amp; access →</a></p>
     <div class="card">
       <form id="drop">
         <label for="repo">Paste a GitHub repo</label>
@@ -632,10 +643,17 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(302, { location: "/signin?reason=error" });
     return res.end();
   }
+  // The owner's groups screen and its endpoints, now that the gate has confirmed a signed-in owner.
+  if (u.pathname === "/groups" || u.pathname.startsWith("/api/groups/")) {
+    if (await groupsAdmin.handle(req, res, u)) return;
+  }
   if (u.pathname === "/api/deploy" && req.method === "POST") return startDeploy(req, res);
   if (u.pathname === "/api/deploy/decide" && req.method === "POST") return decideDeploy(req, res);
   if (u.pathname === "/api/deploy/stream") return streamDeploy(req, res, u.searchParams);
   if (u.pathname === "/") { res.writeHead(200, { "content-type": "text/html; charset=utf-8" }); return res.end(homePage()); }
+  // Safety net: never write a second response header if a handler already answered. A handler that
+  // responded but returned falsy would otherwise crash the whole process here (ERR_HTTP_HEADERS_SENT).
+  if (res.headersSent) return;
   res.writeHead(404, { "content-type": "text/plain" });
   res.end("not found");
 });

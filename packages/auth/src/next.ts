@@ -147,10 +147,16 @@ export async function rolesForUser(user?: User | null): Promise<string[]> {
   if (declared.length === 0) return [];
   let granted: string[] = [];
   if (u.role !== "owner") {
-    try {
-      granted = await groups().grantedRolesForEmail(u.email);
-    } catch {
-      granted = []; // fail-closed: if we cannot read grants, grant nothing beyond the default
+    if (relayEnabled()) {
+      // Relay mode: DP resolved this person's roles centrally at sign-in and carried them in the
+      // session (from the verified assertion). No per-app groups DB to query. Still re-fenced below.
+      granted = u.roles ?? [];
+    } else {
+      try {
+        granted = await groups().grantedRolesForEmail(u.email);
+      } catch {
+        granted = []; // fail-closed: if we cannot read grants, grant nothing beyond the default
+      }
     }
   }
   return resolveRoles({
@@ -317,7 +323,7 @@ export async function googleComplete(req: Request): Promise<Response> {
   });
   if (!result.ok) return back("verify-failed");
 
-  return establishSession(result.identity, url.origin, safeReturnTo(txn.returnTo));
+  return establishSession(result.identity, url.origin, safeReturnTo(txn.returnTo), result.roles);
 }
 
 /**
@@ -414,7 +420,12 @@ export async function googleCallback(req: Request): Promise<Response> {
  * in (decideAccess, fail-closed), record the person, and set the app's own session cookie. This
  * is the single place identity becomes a session, so both paths apply the exact same policy.
  */
-async function establishSession(identity: GoogleIdentity, origin: string, returnTo: string): Promise<Response> {
+async function establishSession(
+  identity: GoogleIdentity,
+  origin: string,
+  returnTo: string,
+  assertionRoles?: string[],
+): Promise<Response> {
   // The allowlist read is best-effort: a miss (e.g. the table does not exist in open mode) just
   // means "not specially marked", and decideAccess is fail-closed.
   let allowlistRole: "owner" | "member" | null = null;
@@ -443,6 +454,9 @@ async function establishSession(identity: GoogleIdentity, origin: string, return
     sub: identity.sub,
     picture: identity.picture,
   };
+  // Relay mode: the roles DP resolved centrally for this (person, app) ride in from the verified
+  // assertion. Bake them into the signed session so requireRole reads them with no per-app groups DB.
+  if (assertionRoles && assertionRoles.length) user.roles = assertionRoles;
 
   // Record them in the people directory (the "just arrived" list). Best-effort.
   try {
