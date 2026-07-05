@@ -644,8 +644,16 @@ const server = http.createServer(async (req, res) => {
     return res.end();
   }
   // The owner's groups screen and its endpoints, now that the gate has confirmed a signed-in owner.
+  // Wrapped so a store error (e.g. a mis-provisioned/unwritable store file) returns a plain 500
+  // instead of an unhandled rejection that would take the whole portal AND the relay down.
   if (u.pathname === "/groups" || u.pathname.startsWith("/api/groups/")) {
-    if (await groupsAdmin.handle(req, res, u)) return;
+    try {
+      if (await groupsAdmin.handle(req, res, u)) return;
+    } catch (e) {
+      console.error("[portal] groups handler error:", e && e.message);
+      if (!res.headersSent) { res.writeHead(500, { "content-type": "text/plain" }); res.end("Something went wrong. Please try again."); }
+      return;
+    }
   }
   if (u.pathname === "/api/deploy" && req.method === "POST") return startDeploy(req, res);
   if (u.pathname === "/api/deploy/decide" && req.method === "POST") return decideDeploy(req, res);

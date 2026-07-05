@@ -70,15 +70,23 @@ if [ "$GOOGLE_ON" = "1" ]; then
   RELAY_ADMINF=/etc/dp-relay-admin.secret
   RELAY_ALLOWDIR=/var/lib/dp-relay
   RELAY_ALLOW="$RELAY_ALLOWDIR/allow.txt"
+  RELAY_STORE="$RELAY_ALLOWDIR/store.json"
   mkdir -p "$RELAY_ALLOWDIR"
   touch "$RELAY_ALLOW"
+  # The DP central groups store (apps / people / groups / memberships / mappings). Create it
+  # valid-but-empty on the first deploy; a redeploy PRESERVES it (never clobber the owner's org
+  # graph). The store writes atomically (temp file + rename) and rotates backups IN this dir, so
+  # the dir itself must be app-user-owned (chowned below), not just the file.
+  [ -f "$RELAY_STORE" ] || echo '{"version":1,"apps":{},"people":{},"groups":{},"members":{},"appRoles":{}}' > "$RELAY_STORE"
   # Generate the key as root (we are root here; /etc is root-owned), then hand ownership to the
   # app user so the node service can read it at runtime.
   RELAY_KID=$(/usr/bin/node "$REPO/apps/portal/relay-keygen.js" "$RELAY_KEY" "$RELAY_PUB" "$RELAY_KIDF")
   if [ ! -f "$RELAY_ADMINF" ]; then openssl rand -hex 24 > "$RELAY_ADMINF"; chmod 600 "$RELAY_ADMINF"; fi
   RELAY_ADMIN=$(cat "$RELAY_ADMINF")
-  # The node service (running as $APPUSER) reads the private key, public key, and allowlist at runtime.
-  chown "$APPUSER:$APPUSER" "$RELAY_KEY" "$RELAY_PUB" "$RELAY_ALLOW" "$RELAY_KIDF"
+  # The node service (running as $APPUSER) reads the private key, public key, and allowlist at
+  # runtime, and READ-WRITES the groups store. Hand it the store DIR (so atomic temp-file writes and
+  # backup rotation can create files in it) plus the store file and the relay key material.
+  chown "$APPUSER:$APPUSER" "$RELAY_ALLOWDIR" "$RELAY_STORE" "$RELAY_KEY" "$RELAY_PUB" "$RELAY_ALLOW" "$RELAY_KIDF"
   chmod 600 "$RELAY_KEY"
   # Append the relay config to the service env (idempotent: strip any prior relay lines first). The
   # keys are passed as FILE PATHS (a multi-line PEM and a JSON JWK do not belong inline in an env file).

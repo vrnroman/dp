@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -65,5 +65,46 @@ test("a bad-CSRF POST to a groups endpoint does not crash the portal", async () 
     assert.ok(await healthy(), "portal must still be alive after a bad-CSRF POST");
   } finally {
     child.kill("SIGKILL");
+  }
+});
+
+test("an unwritable store returns a graceful 500, it does not crash the portal", async () => {
+  // Simulate the production failure that a mis-provisioned store dir caused (root-owned dir, app
+  // user can't create the atomic temp file): a store whose directory has no write bit. A create
+  // must return 500 and the process must stay up (before the fix it was an unhandled rejection).
+  const dir = mkdtempSync(join(tmpdir(), "resil-ro-"));
+  const store = join(dir, "store.json");
+  writeFileSync(store, '{"version":1,"apps":{},"people":{},"groups":{},"members":{},"appRoles":{}}');
+  chmodSync(dir, 0o555); // read+exec, NO write: temp-file creation in this dir will EACCES
+  const PORT2 = 8125;
+  const child: ChildProcess = spawn(process.execPath, [serverJs], {
+    env: { ...process.env, DP_STORE_FILE: store, PORT: String(PORT2), HOST: "127.0.0.1" },
+    stdio: "ignore",
+  });
+  try {
+    const base = `http://127.0.0.1:${PORT2}`;
+    const deadline = Date.now() + 5000;
+    let up = false;
+    while (Date.now() < deadline) { try { if ((await fetch(`${base}/healthz`)).ok) { up = true; break; } } catch {} await new Promise((r) => setTimeout(r, 100)); }
+    assert.ok(up, "portal should start");
+
+    // Read the CSRF token off the /groups page so this is a VALID mutation that only fails at write.
+    const pageHtml = await (await fetch(`${base}/groups`)).text();
+    const csrf = (pageHtml.match(/name="csrf" value="([a-f0-9]+)"/) || [])[1];
+    assert.ok(csrf, "should render a CSRF token");
+
+    const res = await fetch(`${base}/api/groups/create`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf=${csrf}&name=WillFailToPersist`,
+      redirect: "manual",
+    });
+    assert.equal(res.status, 500, "an unwritable store should yield a graceful 500");
+
+    await new Promise((r) => setTimeout(r, 150));
+    assert.ok((await fetch(`${base}/healthz`)).ok, "portal must still be alive after a store write failure");
+  } finally {
+    child.kill("SIGKILL");
+    try { chmodSync(dir, 0o755); } catch {} // restore so the temp dir can be cleaned up
   }
 });
