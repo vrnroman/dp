@@ -3,11 +3,16 @@
  *
  * The evaluator runs on the Claude Code CLI (`claude -p`, subscription auth), NOT the
  * Anthropic SDK, so there is no SDK auto-instrumentation. We treat each `claude -p` round-trip
- * as one Langfuse *generation* and POST it to the Langfuse ingestion API ourselves. This mirrors
- * the proven approach in the echo-v0 bot, kept deliberately minimal here.
+ * as one Langfuse *generation* and POST it to Langfuse's OpenTelemetry endpoint ourselves. This
+ * mirrors the proven approach in the echo-v0 bot, kept deliberately minimal here.
+ *
+ * Wire format (Langfuse v4, observations-first): there is no trace entity to create. One finished
+ * call is ONE complete root span of type `generation`, exported exactly once as OTLP/HTTP JSON to
+ * `/api/public/otel/v1/traces` with the `x-langfuse-ingestion-version: 4` header. The legacy
+ * event-batch endpoint is removed on Langfuse Cloud on 2026-11-16.
  *
  * Design constraints (same as echo):
- *  - ZERO npm dependencies. The ingestion API is one authenticated POST; we build the batch by
+ *  - ZERO npm dependencies. The export is one authenticated POST; we build the OTLP span by
  *    hand. Keeps the package install-free beyond its workspace deps.
  *  - Fully OPT-IN. With LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY unset the module is a no-op,
  *    so tests and offline runs never emit.
@@ -17,7 +22,7 @@
  * IMPORTANT: this uses its OWN Langfuse project keys (separate from echo and any other project),
  * so deployment-platform traces never mix with another product's.
  */
-import { randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 
 type TelemetryConfig = {
   publicKey: string;
@@ -71,7 +76,7 @@ export function resetTelemetryConfig(): void {
   configCache = undefined;
 }
 
-// Pluggable transport so tests can assert on the outgoing batch without a network.
+// Pluggable transport so tests can assert on the outgoing span without a network.
 type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 let transport: FetchLike | undefined;
 
@@ -121,31 +126,43 @@ function clip(s: string | undefined, max: number): string | undefined {
   return `${s.slice(0, max)}… [truncated ${s.length - max} chars]`;
 }
 
+type OtlpValue =
+  | { stringValue: string }
+  | { intValue: string }
+  | { doubleValue: number }
+  | { boolValue: boolean }
+  | { arrayValue: { values: OtlpValue[] } };
+type OtlpAttribute = { key: string; value: OtlpValue };
+
+/** Typed OTLP value: numbers and booleans stay typed, anything structured rides as a JSON string. */
+function otlpValue(v: unknown): OtlpValue {
+  if (typeof v === "string") return { stringValue: v };
+  if (typeof v === "number" && Number.isFinite(v)) {
+    return Number.isInteger(v) ? { intValue: String(v) } : { doubleValue: v };
+  }
+  if (typeof v === "boolean") return { boolValue: v };
+  return { stringValue: JSON.stringify(v) ?? String(v) };
+}
+
+/** OTLP JSON carries int64 nanoseconds as a decimal string. */
+function unixNano(d: Date): string {
+  return `${d.getTime()}000000`;
+}
+
 /**
- * Build the two-event Langfuse batch (a trace plus its single generation) for one Claude call.
+ * Build the OTLP request (one complete root `generation` span) for one Claude call.
  * Exported for unit-testing the wire format.
  */
-export function buildGenerationBatch(
+export function buildGenerationSpan(
   input: GenerationInput,
   cfg: { captureIo: boolean; maxIoChars: number },
-): unknown[] {
-  const traceId = randomUUID();
-  const observationId = randomUUID();
-  const nowIso = input.endTime.toISOString();
-
+): unknown {
   const u = input.usage ?? {};
   const promptTokens = (u.inputTokens ?? 0) + (u.cacheReadTokens ?? 0) + (u.cacheCreationTokens ?? 0);
   const completionTokens = u.outputTokens ?? 0;
   const hasUsage = promptTokens > 0 || completionTokens > 0;
 
-  const usage = hasUsage
-    ? { input: promptTokens, output: completionTokens, total: promptTokens + completionTokens, unit: "TOKENS" as const }
-    : undefined;
-  const costDetails =
-    typeof input.costUsd === "number" && input.costUsd > 0 ? { total: input.costUsd } : undefined;
-
   const isError = Boolean(input.errorMessage);
-  const level = isError ? "ERROR" : "DEFAULT";
 
   const metadata: Record<string, unknown> = {
     product: "deployment-platform",
@@ -156,68 +173,108 @@ export function buildGenerationBatch(
     ...input.extra,
   };
 
-  const io = cfg.captureIo
-    ? { input: clip(input.input, cfg.maxIoChars), output: clip(input.output, cfg.maxIoChars) }
-    : {};
-
-  const tags = ["deployment-platform", "compliance", input.name];
-  const userId = input.appSlug ? `app-${input.appSlug}` : undefined;
-  const sessionId = input.appSlug ? `review-${input.appSlug}` : undefined;
-
-  const traceEvent = {
-    id: randomUUID(),
-    type: "trace-create",
-    timestamp: nowIso,
-    body: {
-      id: traceId,
-      timestamp: input.startTime.toISOString(),
-      name: input.name,
-      ...(userId ? { userId } : {}),
-      ...(sessionId ? { sessionId } : {}),
-      ...io,
-      tags,
-      metadata,
-    },
+  const attributes: OtlpAttribute[] = [];
+  const put = (key: string, v: unknown): void => {
+    if (v !== undefined && v !== null) attributes.push({ key, value: otlpValue(v) });
   };
 
-  const generationEvent = {
-    id: randomUUID(),
-    type: "generation-create",
-    timestamp: nowIso,
-    body: {
-      id: observationId,
-      traceId,
-      name: input.name,
-      startTime: input.startTime.toISOString(),
-      endTime: input.endTime.toISOString(),
-      model: input.model ?? DEFAULT_MODEL,
-      ...io,
-      ...(usage ? { usage } : {}),
-      ...(costDetails ? { costDetails } : {}),
-      level,
-      ...(isError ? { statusMessage: input.errorMessage } : {}),
-      metadata,
+  put("langfuse.observation.type", "generation");
+  put("langfuse.trace.name", input.name);
+  attributes.push({
+    key: "langfuse.trace.tags",
+    value: {
+      arrayValue: {
+        values: ["deployment-platform", "compliance", input.name].map((t) => ({ stringValue: t })),
+      },
     },
-  };
+  });
+  // v4 queries observations directly, so the grouping ids ride the observation itself.
+  if (input.appSlug) {
+    put("langfuse.user.id", `app-${input.appSlug}`);
+    put("langfuse.session.id", `review-${input.appSlug}`);
+  }
+  // The overall request/response lives on the root observation (there is no trace input/output).
+  if (cfg.captureIo) {
+    put("langfuse.observation.input", clip(input.input, cfg.maxIoChars));
+    put("langfuse.observation.output", clip(input.output, cfg.maxIoChars));
+  }
+  put("langfuse.observation.model.name", input.model ?? DEFAULT_MODEL);
+  if (hasUsage) {
+    // OTLP attributes cannot nest: usage and cost ride as JSON strings.
+    put(
+      "langfuse.observation.usage_details",
+      JSON.stringify({ input: promptTokens, output: completionTokens, total: promptTokens + completionTokens }),
+    );
+  }
+  if (typeof input.costUsd === "number" && input.costUsd > 0) {
+    put("langfuse.observation.cost_details", JSON.stringify({ total: input.costUsd }));
+  }
+  put("langfuse.observation.level", isError ? "ERROR" : "DEFAULT");
+  if (isError) put("langfuse.observation.status_message", input.errorMessage);
+  for (const [key, v] of Object.entries(metadata)) put(`langfuse.observation.metadata.${key}`, v);
 
-  return [traceEvent, generationEvent];
+  return {
+    resourceSpans: [
+      {
+        resource: { attributes: [{ key: "service.name", value: { stringValue: "deployment-platform" } }] },
+        scopeSpans: [
+          {
+            scope: { name: "dp-compliance-telemetry" },
+            spans: [
+              {
+                traceId: randomBytes(16).toString("hex"),
+                spanId: randomBytes(8).toString("hex"),
+                name: input.name,
+                kind: 1, // SPAN_KIND_INTERNAL
+                startTimeUnixNano: unixNano(input.startTime),
+                endTimeUnixNano: unixNano(input.endTime),
+                attributes,
+                status: isError ? { code: 2, message: input.errorMessage } : { code: 1 },
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
 }
 
 // In-flight POST promises, awaited by flushTelemetry() before the CLI exits.
 const inflight = new Set<Promise<void>>();
 
-async function postBatch(cfg: TelemetryConfig, batch: unknown[]): Promise<void> {
+/**
+ * POST one OTLP request. Rejects when Langfuse refuses it — by status, or by a 2xx whose body
+ * reports rejected spans (OTLP answers 200 even then). Exported for unit-testing the send path;
+ * callers use recordGeneration, which swallows the rejection.
+ */
+export async function postSpan(
+  cfg: { publicKey: string; secretKey: string; baseUrl: string },
+  payload: unknown,
+): Promise<void> {
   const auth = Buffer.from(`${cfg.publicKey}:${cfg.secretKey}`).toString("base64");
-  const res = await getFetch()(`${cfg.baseUrl}/api/public/ingestion`, {
+  const res = await getFetch()(`${cfg.baseUrl}/api/public/otel/v1/traces`, {
     method: "POST",
-    headers: { "content-type": "application/json", authorization: `Basic ${auth}` },
-    body: JSON.stringify({ batch }),
+    headers: {
+      "content-type": "application/json",
+      authorization: `Basic ${auth}`,
+      "x-langfuse-ingestion-version": "4",
+    },
+    body: JSON.stringify(payload),
     signal: AbortSignal.timeout(10_000),
   });
-  // 207 Multi-Status is the success shape (per-event results); 200/201 also ok.
-  if (!res.ok && res.status !== 207) {
+  if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`langfuse ingestion ${res.status}: ${text.slice(0, 200)}`);
+    throw new Error(`langfuse otel ${res.status}: ${text.slice(0, 200)}`);
+  }
+  // An empty or non-JSON 2xx body is a clean accept.
+  const reply = (await res.json().catch(() => null)) as {
+    partialSuccess?: { rejectedSpans?: number | string; errorMessage?: string };
+  } | null;
+  const rejected = Number(reply?.partialSuccess?.rejectedSpans ?? 0);
+  if (rejected > 0) {
+    throw new Error(
+      `langfuse otel rejected ${rejected} span(s): ${String(reply?.partialSuccess?.errorMessage ?? "").slice(0, 200)}`,
+    );
   }
 }
 
@@ -229,14 +286,14 @@ export function recordGeneration(input: GenerationInput): void {
   const cfg = readConfig();
   if (!cfg) return;
 
-  let batch: unknown[];
+  let payload: unknown;
   try {
-    batch = buildGenerationBatch(input, cfg);
+    payload = buildGenerationSpan(input, cfg);
   } catch {
     return;
   }
 
-  const p = postBatch(cfg, batch)
+  const p = postSpan(cfg, payload)
     .catch(() => {
       /* swallow — fire-and-forget */
     })
